@@ -1,0 +1,881 @@
+"""
+backtest_short_vol.py
+
+Production-Grade Short Volatility Backtest Engine
+-------------------------------------------------
+Strategy:
+    - Sell ATM Straddle (CE+PE) on every Weekly Expiry (Thursday).
+    - Entry: T-0 (Expiry Day) Market Open (proxy via 'Open' price if avail, else 'Close' of prev day?
+      Actually, let's use Expiry Day 'Open' price from the daily candle).
+    - Exit: T-0 (Expiry Day) Market Close (Settlement).
+    - Frequency: Weekly.
+
+Technology:
+    - DuckDB: Streaming SQL execution on Parquet Lake.
+    - Zero-Memory Overhead: No pandas loading of full dataset.
+
+Metrics:
+    - Win Rate, Sharpe, Max Drawdown, Equity Curve.
+"""
+
+import duckdb
+import pandas as pd
+import numpy as np
+from pathlib import Path
+import time
+
+# Configuration
+LAKE_PATH = "data/master_fo_lake"
+DB_PATH = ":memory:"  # In-memory DuckDB
+CAPITAL = 10_000_000  # 1 Crore
+SLIPPAGE_PCT = 0.002  # 0.2% round trip
+TRANSACTION_COST = 50  # Flat fee per leg
+LOT_SIZE = 50  # NIFTY contract size
+LOT_SMARGIN_PCT = 0.20  # 20% of notional
+
+UNIVERSE = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+
+
+def get_margin_pct(rv):
+    """
+    Dynamic SPAN approximation based on realized volatility.
+    """
+    if rv < 0.15:
+        return 0.12  # Calm regime
+    elif rv < 0.25:
+        return 0.20  # Normal regime
+    elif rv < 0.35:
+        return 0.28  # Elevated risk
+    else:
+        return 0.40  # Crisis margin expansion
+
+
+class PortfolioVolEngine:
+    def __init__(self, lake_path=LAKE_PATH):
+        self.lake_path = lake_path
+        self.con = duckdb.connect(DB_PATH)
+        self.active_symbols = []
+        self.rv_series_map = {}
+        self.equity = CAPITAL
+        self.portfolio_returns = []
+
+        self._setup_db()
+        self._validate_universe()
+
+    def _validate_universe(self):
+        """Check which symbols are available in the Lake."""
+        print("[Init] Validating Universe...")
+        for sym in UNIVERSE:
+            try:
+                count = self.con.execute(
+                    f"SELECT COUNT(*) FROM fo_data WHERE TckrSymb = '{sym}'"
+                ).fetchone()[0]
+                if count > 0:
+                    print(f"  + {sym} (Rows: {count})")
+                    self.active_symbols.append(sym)
+                else:
+                    print(f"  - {sym} (Missing)")
+            except Exception as e:
+                print(f"  - {sym} (Error: {e})")
+
+        if not self.active_symbols:
+            raise RuntimeError("No valid symbols found in Universe!")
+
+    def _setup_db(self):
+        """Register Parquet Lake as a DuckDB View."""
+        print(f"[Init] Registering Lake: {self.lake_path}")
+
+        try:
+            # Robust Path Handling for Hive Partitioning
+            # We target the root directory recursively for year=XXXX partitions
+            p = Path(self.lake_path).absolute()
+            pattern = str(p / "**" / "*.parquet")
+
+            self.con.execute("INSTALL parquet;")
+            self.con.execute("LOAD parquet;")
+
+            # Create View
+            query = f"""
+            CREATE OR REPLACE VIEW fo_data AS 
+            SELECT * FROM read_parquet('{pattern}', hive_partitioning=true);
+            """
+            self.con.execute(query)
+
+            # Validation Check (Requested)
+            # Immediately after registering the lake, run:
+            count_nifty = self.con.execute(
+                "SELECT COUNT(*) FROM fo_data WHERE TckrSymb = 'NIFTY'"
+            ).fetchone()[0]
+
+            if count_nifty == 0:
+                raise RuntimeError(
+                    "NIFTY not found in FO lake. Verify bhavcopy ingestion."
+                )
+            else:
+                print(f"[Validation] NIFTY rows detected: {count_nifty}")
+
+            # General Verify
+            total_count = self.con.execute("SELECT count(*) FROM fo_data").fetchone()[0]
+            print(f"[Init] Lake Registered. Total Rows: {total_count}")
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to setup DuckDB: {e}")
+
+    def get_trading_dates_and_expiries(self, symbol):
+        """Get trading dates and expiries for a specific symbol."""
+        # Dates
+        d_query = f"""
+        SELECT DISTINCT TradDt 
+        FROM fo_data 
+        WHERE TckrSymb = '{symbol}'
+        ORDER BY TradDt ASC
+        """
+        trading_dates = pd.to_datetime(
+            self.con.execute(d_query).df()["TradDt"]
+        ).tolist()
+
+        # Expiries
+        e_query = f"""
+        SELECT DISTINCT XpryDt 
+        FROM fo_data 
+        WHERE TckrSymb = '{symbol}'
+        ORDER BY XpryDt ASC
+        """
+        expiries = pd.to_datetime(self.con.execute(e_query).df()["XpryDt"]).tolist()
+
+        return trading_dates, expiries
+
+    def _compute_portfolio_rv(self, silent=False):
+        """Precompute RV for all active symbols."""
+        if not silent:
+            print("[Init] Computing Portfolio Volatility...")
+
+        for sym in self.active_symbols:
+            try:
+                query = f"""
+                SELECT TradDt, AVG(UndrlygPric) as Price
+                FROM fo_data
+                WHERE TckrSymb = '{sym}'
+                GROUP BY TradDt
+                ORDER BY TradDt ASC
+                """
+                df = self.con.execute(query).df()
+
+                if df.empty:
+                    continue
+
+                df["TradDt"] = pd.to_datetime(df["TradDt"])
+                df.set_index("TradDt", inplace=True)
+                df["LogRet"] = np.log(df["Price"] / df["Price"].shift(1))
+                rv = df["LogRet"].rolling(window=10).std() * np.sqrt(252)
+                rv5 = df["LogRet"].rolling(window=5).std() * np.sqrt(252)
+                rv20 = df["LogRet"].rolling(window=20).std() * np.sqrt(252)
+
+                self.rv_series_map[sym] = {
+                    "RV": rv,
+                    "RV5": rv5,
+                    "RV20": rv20,
+                    "LogRet": df["LogRet"],
+                }
+                if not silent:
+                    print(f"  + {sym} RV Computed ({len(rv)} points)")
+            except Exception as e:
+                if not silent:
+                    print(f"  - {sym} RV Failed: {e}")
+
+    def _compute_correlations(self):
+        """Compute rolling correlation matrix (10d Short-Term & 60d Baseline)."""
+        # Align all returns
+        ret_data = {}
+        for sym in self.active_symbols:
+            if "LogRet" in self.rv_series_map.get(sym, {}):
+                ret_data[sym] = self.rv_series_map[sym]["LogRet"]
+
+        if not ret_data:
+            self.corr_10 = pd.Series(dtype=float)
+            self.corr_60 = pd.Series(dtype=float)
+            return
+
+        df_ret = pd.DataFrame(ret_data)
+
+        # Helper for rolling max pairwise
+        def get_rolling_max(window):
+            rolling_corr = df_ret.rolling(window=window).corr()
+            max_corr_series = pd.Series(index=df_ret.index, dtype=float)
+            for date, frame in rolling_corr.groupby(level=0):
+                vals = frame.values
+                np.fill_diagonal(vals, 0)
+                max_corr_series.loc[date] = np.max(vals)
+            return max_corr_series
+
+        self.corr_10 = get_rolling_max(10)
+        self.corr_60 = get_rolling_max(60)
+
+    def _compute_vov(self):
+        """Compute VoV metrics for each symbol."""
+        # Using RV series as the 'Volatility' input since we don't have historical IV.
+        # VoV = StdDev(daily vol changes over last 20 sessions)
+        # Vol_5d_Change = (Current - 5d_ago) / 5d_ago
+
+        for sym, data in self.rv_series_map.items():
+            if "RV" not in data:
+                continue
+
+            # 1. Get Vol Series (using RV)
+            vol_series = data["RV"]
+
+            # 2. Compute 5-day % Change
+            # Shift 5 days
+            vol_change_5d = vol_series.pct_change(periods=5)
+
+            # 3. Compute VoV
+            # Daily change
+            vol_change_1d = vol_series.diff()
+
+            # Clean Data (Drop NaNs/Infs for calculation safety)
+            # Rolling operations handle NaNs (skip), but Infs need to be removed or replaced.
+            vol_change_1d = vol_change_1d.replace([np.inf, -np.inf], np.nan)
+
+            vov = vol_change_1d.rolling(window=20).std()
+
+            # 4. Compute Percentile (1-year rolling)
+            # 252 days. "history length < 200 -> SKIP".
+            # "VoV percentile MUST NOT be computed unless we have MIN 252...".
+            # We use min_periods=252 to enforce warmup.
+            # We also track Count to validate history length at runtime.
+
+            vov_90 = vov.rolling(window=252, min_periods=252).quantile(0.90)
+            vov_count = vov.rolling(window=252).count()
+
+            self.rv_series_map[sym]["VolChange5d"] = vol_change_5d
+            self.rv_series_map[sym]["VoV"] = vov
+            self.rv_series_map[sym]["VoV_90"] = vov_90
+            self.rv_series_map[sym]["VoV_Count"] = vov_count
+
+    def simulate_portfolio(self, rv_threshold=0.35, verbose=True):
+        # 1. Initialization
+        if verbose:
+            self._compute_portfolio_rv()
+            self._compute_correlations()
+            self._compute_vov()
+        else:
+            # Silent compute
+            self._compute_portfolio_rv(silent=True)
+            self._compute_correlations()
+            self._compute_vov()
+
+        # 2. Build Master Timeline & Schedule
+        if verbose:
+            print("[Backtest] Building Portfolio Schedule...")
+        master_dates = set()
+        symbol_schedules = {}  # sym -> {entry_date: (expiry_date, expiry_obj)}
+
+        for sym in self.active_symbols:
+            td, exps = self.get_trading_dates_and_expiries(sym)
+            master_dates.update(td)
+
+            # Map Dates -> Indices for lookback
+            date_map = {d: i for i, d in enumerate(td)}
+            entry_map = {}
+
+            for exp in exps:
+                if exp not in date_map:
+                    continue
+                exp_idx = date_map[exp]
+
+                # Entry: T-3
+                entry_idx = exp_idx - 3
+                if entry_idx < 0:
+                    continue
+
+                entry_date = td[entry_idx]
+                entry_map[entry_date] = exp
+
+            symbol_schedules[sym] = entry_map
+
+        sorted_dates = sorted(list(master_dates))
+        if verbose:
+            print(f"[Backtest] Simulation Start: {len(sorted_dates)} sessions")
+
+        # 3. Simulation Loop
+        open_positions = []  # list of dicts
+        closed_trades = []
+        equity_curve = []
+
+        # Portfolio Safety State
+        current_regime = "NORMAL"
+        blocked_trades = 0
+        blocked_acceleration = 0
+
+        # Correlation Risk State
+        # Metrics
+        shock_days = 0
+        trades_scaled = 0
+        blocked_margin = 0
+        vov_triggers = 0
+
+        t0_start = time.perf_counter()
+
+        for curr_date in sorted_dates:
+            date_str = curr_date.strftime("%Y-%m-%d")
+
+            # --- A. Update Metrics & Check Exits ---
+            # Release margin first
+
+            active_pos_next = []
+
+            for pos in open_positions:
+                sym = pos["Symbol"]
+                expiry = pos["Expiry"]
+
+                # Fetch OHLC for this Position (Strike)
+                # We need Option Prices
+                h_query = f"""
+                SELECT OptnTp, OpnPric, HghPric, LwPric, ClsPric
+                FROM fo_data
+                WHERE TckrSymb = '{sym}'
+                  AND XpryDt = '{expiry.strftime("%Y-%m-%d")}'
+                  AND TradDt = '{date_str}'
+                  AND StrkPric = {pos["Strike"]}
+                """
+                df_hold = self.con.execute(h_query).df()
+
+                exit_signal = False
+                exit_price = 0.0
+                exit_reason = ""
+
+                if df_hold.empty:
+                    # No data? hold.
+                    active_pos_next.append(pos)
+                    continue
+
+                ce_h = df_hold[df_hold["OptnTp"] == "CE"]
+                pe_h = df_hold[df_hold["OptnTp"] == "PE"]
+
+                if ce_h.empty or pe_h.empty:
+                    active_pos_next.append(pos)
+                    continue
+
+                # Prices
+                ce_high = ce_h["HghPric"].iloc[0]
+                ce_low = ce_h["LwPric"].iloc[0]
+                pe_high = pe_h["HghPric"].iloc[0]
+                pe_low = pe_h["LwPric"].iloc[0]
+
+                ce_close = ce_h["ClsPric"].iloc[0]
+                pe_close = pe_h["ClsPric"].iloc[0]
+
+                # 1. Stop Loss (Intraday Worst)
+                worst_val = max(ce_high + pe_low, pe_high + ce_low)
+                stop_val = pos["Premium"] * 2.0
+
+                # 2. Profit Take (Intraday Best)
+                best_val = ce_low + pe_low
+                target_val = pos["Premium"] * 0.30
+
+                # 3. Expiry
+                is_expiry = curr_date == expiry
+
+                # Logic Priority: Stop -> Target -> Expiry
+                # (Conservative: Check Stop first)
+
+                buyback_cost = 0.0
+                pnl = 0.0
+
+                if worst_val >= stop_val:
+                    exit_signal = True
+                    exit_reason = "Stop Loss (2x)"
+                    buyback_cost = stop_val
+                elif best_val <= target_val:
+                    exit_signal = True
+                    exit_reason = "Profit Take (70%)"
+                    buyback_cost = target_val
+                elif is_expiry:
+                    exit_signal = True
+                    exit_reason = "Expiry Close"
+                    buyback_cost = ce_close + pe_close
+
+                if exit_signal:
+                    # Calculate PnL
+                    # PnL = (Entry - Exit) * Size
+                    # Points: Entry - Exit
+                    points_pnl = pos["Premium"] - buyback_cost
+                    gross_pnl = points_pnl * pos["Size"]
+
+                    # Costs
+                    turnover = (pos["Premium"] + buyback_cost) * pos["Size"]
+                    slippage = turnover * SLIPPAGE_PCT
+                    comm = TRANSACTION_COST * 2
+                    net_pnl = gross_pnl - slippage - comm
+
+                    # Update Equity
+                    self.equity += net_pnl
+
+                    # Release Margin (Implicit by removing from open_positions)
+
+                    # Log
+                    pos["Exit_Date"] = date_str
+                    pos["Buyback_Cost"] = buyback_cost
+                    pos["PnL_Net"] = net_pnl
+                    pos["Exit_Reason"] = exit_reason
+                    closed_trades.append(pos)
+
+                else:
+                    active_pos_next.append(pos)
+
+            open_positions = active_pos_next
+
+            # --- B. Check Entries ---
+
+            # Update Correlation Shock Status (Regime Shift)
+            c10 = self.corr_10.get(curr_date, 0.0)
+            c60 = self.corr_60.get(curr_date, 0.0)
+
+            shock_active = False
+
+            # 1. Regime Shift Trigger
+            # ShortTerm >= Baseline + 0.12
+            regime_cond = c10 >= (c60 + 0.12)
+
+            # 2. Hard Crisis Trigger
+            # ShortTerm >= 0.97
+            crisis_cond = c10 >= 0.97
+
+            if regime_cond or crisis_cond:
+                shock_active = True
+                shock_days += 1
+
+            # 1. Update Market Regime (NIFTY Proxy)
+            # Fetch NIFTY RV for today
+            # Now stored as dict.
+            nifty_rv_series = self.rv_series_map.get("NIFTY", {}).get("RV", pd.Series())
+            nifty_rv = nifty_rv_series.get(curr_date, 0.0)
+
+            # Determine Regime
+            if nifty_rv > rv_threshold:
+                start_regime = "HIGH_RISK"
+            else:
+                start_regime = "NORMAL"
+
+            # Log Shift
+            if start_regime != current_regime:
+                if verbose:
+                    print(
+                        f"[REGIME SHIFT] {current_regime} -> {start_regime} (RV: {nifty_rv:.1%})"
+                    )
+                current_regime = start_regime
+
+            # Calculate Current Margin Usage
+            current_margin_used = sum(p["Margin_Locked"] for p in open_positions)
+
+            for sym in self.active_symbols:
+                # Check for Entry Trigger
+                if curr_date not in symbol_schedules[sym]:
+                    continue
+
+                # Check Global Filter
+                if current_regime == "HIGH_RISK":
+                    if verbose:
+                        print(
+                            f"[GLOBAL FILTER] High volatility regime detected — blocking new positions ({sym})."
+                        )
+                    blocked_trades += 1
+                    continue
+
+                # Check Volatility Acceleration Filter
+                # Compute vol_acceleration = RV_5 / RV_20
+                sym_metrics = self.rv_series_map.get(sym, {})
+                rv5 = sym_metrics.get("RV5", pd.Series()).get(curr_date, np.nan)
+                rv20 = sym_metrics.get("RV20", pd.Series()).get(curr_date, np.nan)
+
+                if not pd.isna(rv5) and not pd.isna(rv20) and rv20 > 0:
+                    vol_acceleration = rv5 / rv20
+                    if vol_acceleration > 1.35:
+                        if verbose:
+                            print(
+                                f"[ACCELERATION FILTER] Spiking Vol ({vol_acceleration:.2f}) — blocking {sym}"
+                            )
+                        blocked_acceleration += 1
+                        continue
+
+                # Check VoV Risk Regime
+                # Retrieve metrics
+                sym_data = self.rv_series_map.get(sym, {})
+                vc5 = sym_data.get("VolChange5d", pd.Series()).get(curr_date, 0.0)
+                vov_val = sym_data.get("VoV", pd.Series()).get(curr_date, np.nan)
+                vov_90 = sym_data.get("VoV_90", pd.Series()).get(curr_date, np.nan)
+                vov_count = sym_data.get("VoV_Count", pd.Series()).get(curr_date, 0)
+
+                vov_active = False
+
+                # Check Safety Guardrails
+                # "If len(history) < 200 ... SKIP VoV regime completely."
+                # "VoV percentile MUST NOT be computed unless ... MIN 252" (Enforced by min_periods=252 in rolling)
+
+                if vov_count < 200:
+                    # Too little history for any VoV assessment
+                    pass
+                else:
+                    # Check Triggers
+                    # 1. 5d Spike
+                    spike_cond = vc5 >= 0.35
+
+                    # 2. Percentile Trigger
+                    # "If not available (NaN) ... Do NOT label VoV regime" (for percentile part)
+                    pct_cond = False
+                    if not pd.isna(vov_90) and not pd.isna(vov_val):
+                        if vov_val >= vov_90:
+                            pct_cond = True
+
+                    if spike_cond or pct_cond:
+                        vov_active = True
+                        vov_triggers += 1
+
+                expiry = symbol_schedules[sym][curr_date]
+
+                # Attempt Entry Logic (Phase 1)
+                entry_query = f"""
+                SELECT 
+                    TckrSymb, TradDt, OptnTp, StrkPric, 
+                    OpnPric, HghPric, LwPric, ClsPric, 
+                    UndrlygPric, OpnIntrst, TtlTradgVol 
+                FROM fo_data 
+                WHERE TckrSymb = '{sym}' 
+                  AND XpryDt = '{expiry.strftime("%Y-%m-%d")}' 
+                  AND TradDt = '{date_str}'
+                """
+                df_entry = self.con.execute(entry_query).df()
+
+                if df_entry.empty:
+                    continue
+
+                try:
+                    spot_entry = df_entry["UndrlygPric"].iloc[0]
+                    if pd.isna(spot_entry) or spot_entry == 0:
+                        continue
+                except:
+                    continue
+
+                # Panic Filter (T-5 Check)
+                # We need T-5 from current date for this symbol
+                # Optimization: Run simple query
+                t5_query = f"""
+                SELECT UndrlygPric FROM fo_data 
+                WHERE TckrSymb = '{sym}' AND TradDt < '{date_str}'
+                ORDER BY TradDt DESC LIMIT 1 OFFSET 4
+                """
+                df_t5 = self.con.execute(t5_query).df()
+                if not df_t5.empty:
+                    spot_t5 = df_t5["UndrlygPric"].iloc[0]
+                    if spot_t5 > 0:
+                        ret_5d = (spot_entry / spot_t5) - 1
+                        if abs(ret_5d) > 0.03:
+                            # Skipped Panic
+                            continue
+
+                # Candidate Hunt
+                options = df_entry[df_entry["OptnTp"].isin(["CE", "PE"])].copy()
+                if options.empty:
+                    continue
+
+                strikes = options["StrkPric"].unique()
+                candidates = []
+
+                for stk in strikes:
+                    ce = options[
+                        (options["StrkPric"] == stk) & (options["OptnTp"] == "CE")
+                    ]
+                    pe = options[
+                        (options["StrkPric"] == stk) & (options["OptnTp"] == "PE")
+                    ]
+                    if ce.empty or pe.empty:
+                        continue
+
+                    ce_entry = ce["ClsPric"].iloc[0]
+                    pe_entry = pe["ClsPric"].iloc[0]
+
+                    # Filters
+                    if ce["OpnIntrst"].iloc[0] < 500 or pe["OpnIntrst"].iloc[0] < 500:
+                        continue
+                    if (
+                        ce["TtlTradgVol"].iloc[0] < 1000
+                        or pe["TtlTradgVol"].iloc[0] < 1000
+                    ):
+                        continue
+                    if (ce_entry + pe_entry) < 2.0:
+                        continue
+
+                    diff = abs(ce_entry - pe_entry)
+                    candidates.append(
+                        {
+                            "Strike": stk,
+                            "Diff": diff,
+                            "CE": ce_entry,
+                            "PE": pe_entry,
+                            "Prem": ce_entry + pe_entry,
+                        }
+                    )
+
+                if not candidates:
+                    continue
+
+                best = min(candidates, key=lambda x: x["Diff"])
+
+                # Yield Filter
+                yield_pct = (best["Prem"] / spot_entry) * 100
+                if yield_pct < 0.8:
+                    continue
+
+                # VRP Filter
+                rv_series = self.rv_series_map.get(sym, {}).get("RV", pd.Series())
+                rv = rv_series.get(curr_date, np.nan)
+                if pd.isna(rv):
+                    # Lookback logic difficult here without keeping history?
+                    # Approximation: Assume if missing, skip or use prev.
+                    continue
+
+                iv_proxy = best["Prem"] / spot_entry * np.sqrt(252)
+                if rv <= 0 or iv_proxy < (rv * 1.2):
+                    continue
+
+                # --- SIZING & MARGIN CHECK ---
+
+                # 1. Calculate Required Margin
+                margin_factor = get_margin_pct(rv)
+                margin_req_per_lot = spot_entry * LOT_SIZE * margin_factor
+
+                # 2. Position Limits & Sizing
+
+                # Dynamic Position Scaling (Correlation Risk & VoV Risk)
+                # Base Risk
+                risk_pct = 0.05
+
+                # Interaction Logic
+                # "If BOTH fire: 5% -> 2%"
+                # "Trigger a VoV risk regime ... Scale risk 5% -> 2.5%"
+                # "Correlation Regime ... Scale: 5% -> 3.5%"
+
+                # Let's handle precedence/interaction
+                # Base: 5%
+
+                scaled_msg = ""
+
+                if shock_active and vov_active:
+                    risk_pct = 0.02
+                    scaled_msg = "5% -> 2% (Dual Shock)"
+                elif vov_active:
+                    risk_pct = 0.025
+                    scaled_msg = "5% -> 2.5% (VoV Crisis)"
+                elif shock_active:
+                    risk_pct = 0.035
+                    scaled_msg = "5% -> 3.5% (Correlation Shock)"
+
+                if verbose:
+                    if vov_active:
+                        print(f"[VoV REGIME ACTIVE]")
+                        print(f"    IV 5d Change:   {vc5:.1%}")
+                        if not pd.isna(vov_90):
+                            print(f"    VoV Value:      {vov_val:.4f}")
+                            print(f"    90th Threshold: {vov_90:.4f}")
+                            print(f"    History Length: {int(vov_count)}")
+                        else:
+                            print(
+                                f"    VoV Check:      Skipped (Insufficient History: {int(vov_count)})"
+                            )
+
+                        print(f"    Scaled: {scaled_msg}")
+                    elif (
+                        shock_active
+                    ):  # Only print correlation if not already covered by dual shock
+                        print(f"[Correlation Regime Shift]")
+                        print(f"    Baseline Corr:   {c60:.2f}")
+                        print(f"    Short-term Corr: {c10:.2f}")
+                        print(f"    Scaled: {scaled_msg}")
+
+                risk_budget = self.equity * risk_pct
+                risk_per_lot = 2 * best["Prem"] * LOT_SIZE
+                lots_risk = risk_budget // risk_per_lot if risk_per_lot > 0 else 0
+
+                # Check Portfolio Margin Cap (65%)
+                # Proposed Margin = Current + New
+                # We need to know Lots first to compute New Margin.
+                # But lots depends on Margin Budget?
+                # "Recalculate projected portfolio margin ... NEVER allow > 65%"
+                # So we calculate candidate lots based on RISK and generic margin budget first?
+                # Then check the 65% hard cap.
+
+                # Generic Margin Sizing (to ensure we have enough free cash to open)
+                # We can stick to 60% sizing budget or use 65%?
+                # If we use 65% for sizing, we might validly size to 64% and pass hard cap.
+                # If we keep 60% sizing, we never hit 65% hard cap (unless existing positions expand? But here we use entry margin).
+                # User said: "Recalculate projected ... Hard rule ... NEVER allow > 65%".
+                # This implies checking the Resulting State.
+                # Let's use 65% as the budget for sizing too, to allow the scaling logic to work up to the hard cap.
+
+                margin_budget_total = self.equity * 0.65
+
+                # Available for NEW trades
+                margin_available = margin_budget_total - current_margin_used
+                if margin_available <= 0:
+                    # Already over cap
+                    continue
+
+                lots_margin = (
+                    margin_available // margin_req_per_lot
+                    if margin_req_per_lot > 0
+                    else 0
+                )
+
+                candidate_lots = int(min(lots_risk, lots_margin))
+
+                if candidate_lots < 1:
+                    continue
+
+                # Final Hard Cap Check (Redundant if we sized with 65% budget, but specific blocking required)
+                # "If exceeded: Skip... Print [Blocked: Portfolio Margin Cap]"
+                # Sizing with 65% budget ensures we don't exceed 65%.
+                # But maybe `lots_risk` is the constraint, and we need to check if that also fits margin?
+                # min(lots_risk, lots_margin) guarantees it fits margin_available.
+                # So we implicitly satisfy < 65%.
+                # BUT, if we were rejected because `margin_available <= 0`, we should log "Blocked".
+                # Wait, "If exceeded: Skip the trade. Print [Blocked...]"
+                # The sizing logic `lots_margin` ensures we don't select a size that exceeds.
+                # But if `margin_available` was effectively 0 (or close) such that lots < 1?
+                # Let's implement the explicit check logic for the log.
+
+                projected_margin_usage = current_margin_used + (
+                    candidate_lots * margin_req_per_lot
+                )
+                projected_margin_pct = projected_margin_usage / self.equity
+
+                if projected_margin_pct > 0.65:
+                    # Should rarely happen with lots_margin logic, but floating point?
+                    if verbose:
+                        print("[Risk Block]")
+                        print(
+                            f"    Reason: Portfolio Margin > 65% ({projected_margin_pct:.1%})"
+                        )
+                    blocked_margin += 1
+                    continue
+
+                # If we are here, we are good.
+                lots = candidate_lots
+
+                # EXECUTE
+                if shock_active or vov_active:
+                    trades_scaled += 1
+
+                margin_locked = lots * margin_req_per_lot
+                current_margin_used += (
+                    margin_locked  # Update for next symbol in same loop
+                )
+
+                pos_record = {
+                    "Symbol": sym,
+                    "Entry_Date": date_str,
+                    "Expiry": expiry,
+                    "Strike": best["Strike"],
+                    "Premium": best["Prem"],
+                    "Size": lots * LOT_SIZE,
+                    "Appx_Spot": spot_entry,
+                    "Margin_Locked": margin_locked,
+                    "Margin_Pct": margin_factor,
+                }
+                open_positions.append(pos_record)
+
+                if verbose:
+                    print(f"[{sym}] EXECUTED STRADDLE")
+                    print(f"    Date: {date_str} | Strike: {best['Strike']}")
+                    print(
+                        f"    Portfolio Margin Used: {current_margin_used / self.equity:.1%}"
+                    )
+                    print(f"    Margin Used:   {margin_factor:.0%}")
+
+            # End of Day
+            # Track Equity
+            equity_curve.append({"Date": date_str, "Equity": self.equity})
+            self.portfolio_returns.append(0.0)  # Placeholder, calc later or diff
+
+        elapsed = time.perf_counter() - t0_start
+        if verbose:
+            print(f"[Backtest] Simulation Complete in {elapsed:.2f}s")
+            print(f"[Safety] Trades Blocked By Regime Filter: {blocked_trades}")
+            print(
+                f"[Safety] Trades Blocked By Acceleration Filter: {blocked_acceleration}"
+            )
+            print(f"[Risk] Correlation Shock Days: {shock_days}")
+            print(f"[Risk] Trades Scaled: {trades_scaled}")
+            print(f"[Risk] Trades Blocked (Margin): {blocked_margin}")
+            print(f"[Risk] VoV Trigger Count: {vov_triggers}")
+
+        return (
+            pd.DataFrame(closed_trades),
+            pd.DataFrame(equity_curve),
+            {
+                "blocked_regime": blocked_trades,
+                "blocked_accel": blocked_acceleration,
+                "blocked_margin": blocked_margin,
+                "trades_scaled": trades_scaled,
+                "shock_days": shock_days,
+                "vov_triggers": vov_triggers,
+            },
+        )
+
+    def analyze_portfolio(self, trades, equity_df):
+        if trades.empty:
+            print("No trades.")
+            return
+
+        print("\n=== INSTITUTIONAL PORTFOLIO DASHBOARD ===")
+        print(f"Ending Equity: {self.equity:,.2f} INR")
+
+        # Calculates Returns based on Equity Curve
+        equity_df["Prev"] = equity_df["Equity"].shift(1).fillna(CAPITAL)
+        equity_df["Ret"] = equity_df["Equity"] / equity_df["Prev"] - 1
+
+        # Portfolio Metrics
+        mean_ret = equity_df["Ret"].mean()
+        std_ret = equity_df["Ret"].std()
+        ann_factor = np.sqrt(252)  # Daily returns
+
+        sharpe = (mean_ret / std_ret) * ann_factor if std_ret > 0 else 0
+
+        dd = equity_df["Equity"] / equity_df["Equity"].cummax() - 1
+        max_dd = dd.min()
+
+        downside = equity[equity["Ret"] < 0]["Ret"].std()
+        sortino = (mean_ret / downside) * ann_factor if downside > 0 else 0
+
+        print(f"{'Metric':<20} | {'Value':<15}")
+        print("-" * 38)
+        print(f"{'Sharpe Ratio':<20} | {sharpe:.2f}")
+        print(f"{'Sortino Ratio':<20} | {sortino:.2f}")
+        print(f"{'Max Drawdown':<20} | {max_dd:.2%}")
+        print(f"{'Total Trades':<20} | {len(trades)}")
+
+        # Asset Diversification
+        print("\n[Asset Breakdown]")
+        breakdown = trades.groupby("Symbol")["PnL_Net"].sum()
+        for sym, pnl in breakdown.items():
+            print(f"  {sym:<10}: {pnl:,.2f} INR")
+
+        print("\n[Equity Curve]")
+        if len(equity_df) > 0:
+            min_e = equity_df["Equity"].min()
+            max_e = equity_df["Equity"].max()
+            rnge = max_e - min_e if max_e != min_e else 1
+            step = max(1, len(equity_df) // 20)
+            for _, row in equity_df.iloc[::step].iterrows():
+                pos = int(((row["Equity"] - min_e) / rnge) * 50)
+                print(f"{row['Date']}: {'#' * pos} ({row['Equity']:,.0f})")
+
+
+def run_portfolio_backtest():
+    # Silent run, manual output
+    bt = PortfolioVolEngine()
+
+    # We want standard 0.35 regime threshold, verbose=True to see log but NOT dashboard?
+    # User said "Output ONLY..."
+    # So run silent verbose=False to suppress trade logs?
+    # "Log once at the end... No per-trade spam." -> verbose=False for sensitivity check?
+    # But for THIS step user asked for specific logs "When scal
