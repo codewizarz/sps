@@ -940,9 +940,22 @@ class PortfolioVolEngine:
                     # Approximation: Assume if missing, skip or use prev.
                     continue
 
-                iv_proxy = best["Prem"] / spot_entry * np.sqrt(252)
-                if rv <= 0 or iv_proxy < (rv * 1.2):
+                # Brenner-Subrahmanyam ATM IV Approximation
+                days_to_expiry = (expiry.date() - curr_date.date()).days
+                if days_to_expiry <= 0:
                     continue
+
+                t_years = days_to_expiry / 365.0
+                iv_valid = best["Prem"] / (0.4 * spot_entry * np.sqrt(t_years))
+
+                if rv <= 0 or iv_valid <= (rv * 1.15):
+                    continue
+
+                # Print validation logic (do not spam verbose setting)
+                print("[IV VALIDATED]")
+                print(f"IV: {iv_valid:.2%}")
+                print(f"RV: {rv:.2%}")
+                print(f"Ratio: {(iv_valid / rv):.2f}")
 
                 # --- SIZING & MARGIN CHECK ---
 
