@@ -25,7 +25,11 @@ from pathlib import Path
 import time
 
 # Configuration
-LAKE_PATH = "data/master_fo_lake"
+LAKE_PATH = str(
+    Path(
+        Path(__file__).resolve().parent.parent.parent.parent / "data" / "master_fo_lake"
+    ).absolute()
+)
 DB_PATH = ":memory:"  # In-memory DuckDB
 CAPITAL = 10_000_000  # 1 Crore
 SLIPPAGE_PCT = 0.002  # 0.2% round trip
@@ -167,6 +171,7 @@ class PortfolioVolEngine:
                 df["TradDt"] = pd.to_datetime(df["TradDt"])
                 df.set_index("TradDt", inplace=True)
                 df["LogRet"] = np.log(df["Price"] / df["Price"].shift(1))
+                df["Move_3"] = np.abs(np.log(df["Price"] / df["Price"].shift(3)))
                 rv = df["LogRet"].rolling(window=10).std() * np.sqrt(252)
                 rv5 = df["LogRet"].rolling(window=5).std() * np.sqrt(252)
                 rv20 = df["LogRet"].rolling(window=20).std() * np.sqrt(252)
@@ -176,6 +181,7 @@ class PortfolioVolEngine:
                     "RV5": rv5,
                     "RV20": rv20,
                     "LogRet": df["LogRet"],
+                    "Move_3": df["Move_3"],
                 }
                 if not silent:
                     print(f"  + {sym} RV Computed ({len(rv)} points)")
@@ -314,9 +320,38 @@ class PortfolioVolEngine:
         blocked_margin = 0
         vov_triggers = 0
 
+        # Post-Shock Cooldown State
+        cooldown_active = False
+        cooldown_days_remaining = 0
+        cooldown_activations = 0
+
+        # Daily Portfolio Kill Switch State
+        kill_switch_active = False
+        kill_switch_activations = 0
+        day_start_equity = self.equity
+
+        # VoV Warmup Tracking
+        vov_warmup_logged = False
+
+        # Crisis Long Vol Tracking
+        crisis_trades = 0
+
         t0_start = time.perf_counter()
 
         for curr_date in sorted_dates:
+            # --- START OF DAY: RESET KILL SWITCH ---
+            day_start_equity = self.equity
+            kill_switch_active = False
+            vov_warmup_logged = False
+
+            # --- UPDATE COOLDOWN STATE ---
+            if cooldown_active:
+                cooldown_days_remaining -= 1
+                if cooldown_days_remaining <= 0:
+                    cooldown_active = False
+                    if verbose:
+                        print(f"[POST-SHOCK MODE] Cooldown Expired — Risk Restored")
+
             date_str = curr_date.strftime("%Y-%m-%d")
 
             # --- A. Update Metrics & Check Exits ---
@@ -341,7 +376,6 @@ class PortfolioVolEngine:
                 df_hold = self.con.execute(h_query).df()
 
                 exit_signal = False
-                exit_price = 0.0
                 exit_reason = ""
 
                 if df_hold.empty:
@@ -365,67 +399,123 @@ class PortfolioVolEngine:
                 ce_close = ce_h["ClsPric"].iloc[0]
                 pe_close = pe_h["ClsPric"].iloc[0]
 
-                # 1. Stop Loss (Intraday Worst)
-                worst_val = max(ce_high + pe_low, pe_high + ce_low)
-                stop_val = pos["Premium"] * 2.0
-
-                # 2. Profit Take (Intraday Best)
-                best_val = ce_low + pe_low
-                target_val = pos["Premium"] * 0.30
-
-                # 3. Expiry
                 is_expiry = curr_date == expiry
-
-                # Logic Priority: Stop -> Target -> Expiry
-                # (Conservative: Check Stop first)
-
                 buyback_cost = 0.0
-                pnl = 0.0
 
-                if worst_val >= stop_val:
-                    exit_signal = True
-                    exit_reason = "Stop Loss (2x)"
-                    buyback_cost = stop_val
-                elif best_val <= target_val:
-                    exit_signal = True
-                    exit_reason = "Profit Take (70%)"
-                    buyback_cost = target_val
-                elif is_expiry:
-                    exit_signal = True
-                    exit_reason = "Expiry Close"
-                    buyback_cost = ce_close + pe_close
+                if pos.get("Is_Crisis", False):
+                    pos["Days_Held"] += 1
+                    curr_val = ce_close + pe_close
 
-                if exit_signal:
-                    # Calculate PnL
-                    # PnL = (Entry - Exit) * Size
-                    # Points: Entry - Exit
-                    points_pnl = pos["Premium"] - buyback_cost
-                    gross_pnl = points_pnl * pos["Size"]
+                    sym_metrics = self.rv_series_map.get(pos["Symbol"], {})
+                    p_rv5 = sym_metrics.get("RV5", pd.Series()).get(curr_date, np.nan)
+                    p_rv20 = sym_metrics.get("RV20", pd.Series()).get(curr_date, np.nan)
+                    vol_norm = False
+                    if pd.notna(p_rv5) and pd.notna(p_rv20) and p_rv20 > 0:
+                        if (p_rv5 / p_rv20) < 1.1:
+                            vol_norm = True
 
-                    # Costs
-                    turnover = (pos["Premium"] + buyback_cost) * pos["Size"]
-                    slippage = turnover * SLIPPAGE_PCT
-                    comm = TRANSACTION_COST * 2
-                    net_pnl = gross_pnl - slippage - comm
+                    if curr_val >= pos["Premium"] * 1.8:
+                        exit_signal = True
+                        exit_reason = "CRISIS EXIT - TARGET"
+                        buyback_cost = pos["Premium"] * 1.8
+                    elif curr_val <= pos["Premium"] * 0.55:
+                        exit_signal = True
+                        exit_reason = "CRISIS EXIT - STOP"
+                        buyback_cost = pos["Premium"] * 0.55
+                    elif vol_norm:
+                        exit_signal = True
+                        exit_reason = "CRISIS EXIT - NORMALIZED"
+                        buyback_cost = curr_val
+                    elif pos["Days_Held"] >= 10:
+                        exit_signal = True
+                        exit_reason = "CRISIS EXIT - MAX HOLD"
+                        buyback_cost = curr_val
+                    elif is_expiry:
+                        exit_signal = True
+                        exit_reason = "CRISIS EXIT - EXPIRY"
+                        buyback_cost = curr_val
 
-                    # Update Equity
-                    self.equity += net_pnl
+                    if exit_signal:
+                        # Long PnL computation: (Exit Price - Entry Price) * Size
+                        points_pnl = buyback_cost - pos["Premium"]
+                        gross_pnl = points_pnl * pos["Size"]
 
-                    # Release Margin (Implicit by removing from open_positions)
+                        turnover = (pos["Premium"] + buyback_cost) * pos["Size"]
+                        slippage = turnover * SLIPPAGE_PCT
+                        comm = TRANSACTION_COST * 2
+                        net_pnl = gross_pnl - slippage - comm
 
-                    # Log
-                    pos["Exit_Date"] = date_str
-                    pos["Buyback_Cost"] = buyback_cost
-                    pos["PnL_Net"] = net_pnl
-                    pos["Exit_Reason"] = exit_reason
-                    closed_trades.append(pos)
+                        self.equity += net_pnl
+                        pos["Exit_Date"] = date_str
+                        pos["Buyback_Cost"] = buyback_cost
+                        pos["PnL_Net"] = net_pnl
+                        pos["Exit_Reason"] = exit_reason
+                        closed_trades.append(pos)
+                        if verbose:
+                            print(
+                                f"[{exit_reason}] {pos['Symbol']} | PnL: {net_pnl:.2f}"
+                            )
 
                 else:
+                    # 1. Stop Loss (Intraday Worst)
+                    worst_val = max(ce_high + pe_low, pe_high + ce_low)
+                    stop_val = pos["Premium"] * 2.0
+
+                    # 2. Profit Take (Intraday Best)
+                    best_val = ce_low + pe_low
+                    target_val = pos["Premium"] * 0.30
+
+                    if worst_val >= stop_val:
+                        exit_signal = True
+                        exit_reason = "Stop Loss (2x)"
+                        buyback_cost = stop_val
+                    elif best_val <= target_val:
+                        exit_signal = True
+                        exit_reason = "Profit Take (70%)"
+                        buyback_cost = target_val
+                    elif is_expiry:
+                        exit_signal = True
+                        exit_reason = "Expiry Close"
+                        buyback_cost = ce_close + pe_close
+
+                    if exit_signal:
+                        # Calculate PnL
+                        # For short trades: PnL = (Entry - Exit) * Size
+                        points_pnl = pos["Premium"] - buyback_cost
+                        gross_pnl = points_pnl * pos["Size"]
+
+                        # Costs
+                        turnover = (pos["Premium"] + buyback_cost) * pos["Size"]
+                        slippage = turnover * SLIPPAGE_PCT
+                        comm = TRANSACTION_COST * 2
+                        net_pnl = gross_pnl - slippage - comm
+
+                        # Update Equity
+                        self.equity += net_pnl
+
+                        # Log
+                        pos["Exit_Date"] = date_str
+                        pos["Buyback_Cost"] = buyback_cost
+                        pos["PnL_Net"] = net_pnl
+                        pos["Exit_Reason"] = exit_reason
+                        closed_trades.append(pos)
+
+                if not exit_signal:
                     active_pos_next.append(pos)
 
             open_positions = active_pos_next
 
             # --- B. Check Entries ---
+            # KILL SWITCH CHECK: Monitor intraday drawdown
+            if self.equity < day_start_equity:
+                intraday_dd = (self.equity - day_start_equity) / day_start_equity
+                if intraday_dd <= -0.02 and not kill_switch_active:
+                    kill_switch_active = True
+                    kill_switch_activations += 1
+                    if verbose:
+                        print("[KILL SWITCH TRIGGERED]")
+                        print(f"    Intraday DD: {intraday_dd:.2%}")
+                        print("    New trades blocked until next session.")
 
             # Update Correlation Shock Status (Regime Shift)
             c10 = self.corr_10.get(curr_date, 0.0)
@@ -446,13 +536,27 @@ class PortfolioVolEngine:
                 shock_days += 1
 
             # 1. Update Market Regime (NIFTY Proxy)
-            # Fetch NIFTY RV for today
-            # Now stored as dict.
-            nifty_rv_series = self.rv_series_map.get("NIFTY", {}).get("RV", pd.Series())
-            nifty_rv = nifty_rv_series.get(curr_date, 0.0)
+            nifty_data = self.rv_series_map.get("NIFTY", {})
+            nifty_rv = nifty_data.get("RV", pd.Series()).get(curr_date, 0.0)
+            n_rv5 = nifty_data.get("RV5", pd.Series()).get(curr_date, np.nan)
+            n_rv20 = nifty_data.get("RV20", pd.Series()).get(curr_date, np.nan)
+            n_move3 = nifty_data.get("Move_3", pd.Series()).get(curr_date, np.nan)
 
-            # Determine Regime
-            if nifty_rv > rv_threshold:
+            vol_accel = (
+                n_rv5 / n_rv20
+                if (pd.notna(n_rv5) and pd.notna(n_rv20) and n_rv20 > 0)
+                else 0.0
+            )
+
+            is_crisis = False
+            if (vol_accel >= 1.40 and c10 >= 0.95) or (
+                pd.notna(n_move3) and n_move3 >= 0.04
+            ):
+                is_crisis = True
+
+            if is_crisis:
+                start_regime = "CRISIS"
+            elif nifty_rv > rv_threshold:
                 start_regime = "HIGH_RISK"
             else:
                 start_regime = "NORMAL"
@@ -460,16 +564,177 @@ class PortfolioVolEngine:
             # Log Shift
             if start_regime != current_regime:
                 if verbose:
-                    print(
-                        f"[REGIME SHIFT] {current_regime} -> {start_regime} (RV: {nifty_rv:.1%})"
-                    )
+                    if start_regime == "CRISIS":
+                        print(f"[CRISIS REGIME ACTIVATED]")
+                    elif current_regime == "CRISIS" and start_regime != "CRISIS":
+                        print(
+                            f"[REGIME SHIFT] CRISIS -> {start_regime} (RV: {nifty_rv:.1%})"
+                        )
+                    else:
+                        print(
+                            f"[REGIME SHIFT] {current_regime} -> {start_regime} (RV: {nifty_rv:.1%})"
+                        )
                 current_regime = start_regime
 
             # Calculate Current Margin Usage
             current_margin_used = sum(p["Margin_Locked"] for p in open_positions)
 
             for sym in self.active_symbols:
-                # Check for Entry Trigger
+                # KILL SWITCH: Block all new entries if triggered
+                if kill_switch_active:
+                    continue
+
+                # Crisis Logic Branch
+                if current_regime == "CRISIS":
+                    # Check if already hold crisis position for this symbol
+                    has_crisis = any(
+                        p["Symbol"] == sym and p.get("Is_Crisis", False)
+                        for p in open_positions
+                    )
+                    if has_crisis:
+                        continue
+
+                    # Find nearest future expiry
+                    exps_all = sorted(list(set(symbol_schedules[sym].values())))
+                    future_exps = [e for e in exps_all if e >= curr_date]
+                    if not future_exps:
+                        continue
+                    expiry = future_exps[0]
+
+                    entry_query = f"""
+                    SELECT 
+                        TckrSymb, TradDt, OptnTp, StrkPric, 
+                        OpnPric, HghPric, LwPric, ClsPric, 
+                        UndrlygPric, OpnIntrst, TtlTradgVol 
+                    FROM fo_data 
+                    WHERE TckrSymb = '{sym}' 
+                      AND XpryDt = '{expiry.strftime("%Y-%m-%d")}' 
+                      AND TradDt = '{date_str}'
+                    """
+                    df_entry = self.con.execute(entry_query).df()
+                    if df_entry.empty:
+                        continue
+
+                    spot_entry = df_entry["UndrlygPric"].iloc[0]
+                    if pd.isna(spot_entry) or spot_entry <= 0:
+                        continue
+
+                    options = df_entry[df_entry["OptnTp"].isin(["CE", "PE"])].copy()
+                    if options.empty:
+                        continue
+                    strikes = options["StrkPric"].unique()
+                    candidates = []
+
+                    for stk in strikes:
+                        ce = options[
+                            (options["StrkPric"] == stk) & (options["OptnTp"] == "CE")
+                        ]
+                        pe = options[
+                            (options["StrkPric"] == stk) & (options["OptnTp"] == "PE")
+                        ]
+                        if ce.empty or pe.empty:
+                            continue
+
+                        ce_entry = ce["ClsPric"].iloc[0]
+                        pe_entry = pe["ClsPric"].iloc[0]
+                        if (
+                            ce["OpnIntrst"].iloc[0] < 1000
+                            or pe["OpnIntrst"].iloc[0] < 1000
+                        ):
+                            continue
+                        if (
+                            ce["TtlTradgVol"].iloc[0] < 2000
+                            or pe["TtlTradgVol"].iloc[0] < 2000
+                        ):
+                            continue
+
+                        diff = abs(stk - spot_entry)
+                        candidates.append(
+                            {
+                                "Strike": stk,
+                                "SpotDiff": diff,
+                                "CE": ce_entry,
+                                "PE": pe_entry,
+                                "Prem": ce_entry + pe_entry,
+                            }
+                        )
+
+                    if not candidates:
+                        continue
+                    best = min(candidates, key=lambda x: x["SpotDiff"])
+
+                    # RULE 4: Minimum Premium Safety
+                    if best["Prem"] < 0.005 * spot_entry:
+                        continue
+
+                    risk_pct = 0.02
+                    risk_budget = self.equity * risk_pct
+                    risk_per_lot = best["Prem"] * LOT_SIZE
+                    candidate_lots = (
+                        int(np.floor(risk_budget / risk_per_lot))
+                        if risk_per_lot > 0
+                        else 0
+                    )
+                    if candidate_lots < 1 and self.equity >= risk_per_lot:
+                        candidate_lots = 1
+
+                    original_lots = candidate_lots
+
+                    # RULE 1: Max 5 lots per symbol
+                    candidate_lots = min(candidate_lots, 5)
+
+                    # RULE 2: Single trade capital limit
+                    trade_premium = best["Prem"] * LOT_SIZE
+                    max_lots_by_trade_limit = (
+                        int((0.03 * self.equity) / trade_premium)
+                        if trade_premium > 0
+                        else 0
+                    )
+                    candidate_lots = min(candidate_lots, max_lots_by_trade_limit)
+
+                    # RULE 3: Total Long Vol Exposure Cap
+                    crisis_premium_spent = sum(
+                        p["Premium"] * p["Size"]
+                        for p in open_positions
+                        if p.get("Is_Crisis", False)
+                    )
+                    new_trade_premium = candidate_lots * trade_premium
+                    if crisis_premium_spent + new_trade_premium > 0.10 * self.equity:
+                        continue
+
+                    # RULE 5: Integer Safety
+                    if candidate_lots < 1:
+                        continue
+
+                    if candidate_lots < original_lots:
+                        print("[LOT SAFETY REDUCTION APPLIED]")
+
+                    lots = candidate_lots
+
+                    margin_locked = best["Prem"] * LOT_SIZE * lots
+                    pos_record = {
+                        "Symbol": sym,
+                        "Entry_Date": date_str,
+                        "Expiry": expiry,
+                        "Strike": best["Strike"],
+                        "Premium": best["Prem"],
+                        "Size": lots * LOT_SIZE,
+                        "Appx_Spot": spot_entry,
+                        "Margin_Locked": margin_locked,
+                        "Margin_Pct": 0.0,
+                        "Is_Crisis": True,
+                        "Days_Held": 0,
+                    }
+                    open_positions.append(pos_record)
+                    crisis_trades += 1
+                    if verbose:
+                        print(
+                            f"[CRISIS TRADE OPENED] {sym} | Strike: {best['Strike']} | Lots: {lots}"
+                        )
+
+                    continue  # Skip normal short vol logic for this symbol in Crisis Regime
+
+                # Check for Normal Entry Trigger
                 if curr_date not in symbol_schedules[sym]:
                     continue
 
@@ -507,29 +772,68 @@ class PortfolioVolEngine:
                 vov_count = sym_data.get("VoV_Count", pd.Series()).get(curr_date, 0)
 
                 vov_active = False
+                vov_enabled = False
 
-                # Check Safety Guardrails
-                # "If len(history) < 200 ... SKIP VoV regime completely."
-                # "VoV percentile MUST NOT be computed unless ... MIN 252" (Enforced by min_periods=252 in rolling)
+                # VoV WARMUP CHECK: Require minimum 20 sessions
+                VoV_WARMUP_PERIOD = 20
 
-                if vov_count < 200:
-                    # Too little history for any VoV assessment
-                    pass
+                if vov_count >= VoV_WARMUP_PERIOD:
+                    vov_enabled = True
+
+                    # Check Safety Guardrails (only if enabled)
+                    if vov_count < 200:
+                        pass
+                    else:
+                        # Check Triggers
+                        spike_cond = vc5 >= 0.35
+
+                        pct_cond = False
+                        if not pd.isna(vov_90) and not pd.isna(vov_val):
+                            if vov_val >= vov_90:
+                                pct_cond = True
+
+                        if spike_cond or pct_cond:
+                            vov_active = True
+                            vov_triggers += 1
                 else:
-                    # Check Triggers
-                    # 1. 5d Spike
-                    spike_cond = vc5 >= 0.35
+                    # VoV not enabled - log once per session
+                    if verbose and not vov_warmup_logged:
+                        print("[VoV Disabled \u2014 Warmup]")
+                        print(
+                            f"    History: {int(vov_count) if pd.notna(vov_count) else 0} / {VoV_WARMUP_PERIOD} sessions"
+                        )
+                        vov_warmup_logged = True
 
-                    # 2. Percentile Trigger
-                    # "If not available (NaN) ... Do NOT label VoV regime" (for percentile part)
-                    pct_cond = False
-                    if not pd.isna(vov_90) and not pd.isna(vov_val):
-                        if vov_val >= vov_90:
-                            pct_cond = True
+                # --- POST-SHOCK TRIGGER DETECTION ---
+                # Trigger if:
+                # 1. Acceleration filter would block
+                # 2. VoV crisis active
+                # 3. Correlation shock > 0.95
 
-                    if spike_cond or pct_cond:
-                        vov_active = True
-                        vov_triggers += 1
+                post_shock_trigger = False
+
+                # Check acceleration (already computed above)
+                if not pd.isna(rv5) and not pd.isna(rv20) and rv20 > 0:
+                    vol_acceleration = rv5 / rv20
+                    if vol_acceleration > 1.35:
+                        post_shock_trigger = True
+
+                # Check VoV
+                if vov_active and vov_enabled:
+                    post_shock_trigger = True
+
+                # Check extreme correlation
+                if c10 > 0.95:
+                    post_shock_trigger = True
+
+                # Activate cooldown if triggered
+                if post_shock_trigger and not cooldown_active:
+                    cooldown_active = True
+                    cooldown_days_remaining = 10
+                    cooldown_activations += 1
+                    if verbose:
+                        print(f"[POST-SHOCK MODE ACTIVATED]")
+                        print(f"    Cooldown Days: 10")
 
                 expiry = symbol_schedules[sym][curr_date]
 
@@ -553,7 +857,9 @@ class PortfolioVolEngine:
                     spot_entry = df_entry["UndrlygPric"].iloc[0]
                     if pd.isna(spot_entry) or spot_entry == 0:
                         continue
-                except:
+                except Exception as e:
+                    if verbose:
+                        print(f"[{sym}] Skip Logic Error: {e}")
                     continue
 
                 # Panic Filter (T-5 Check)
@@ -651,13 +957,6 @@ class PortfolioVolEngine:
                 risk_pct = 0.05
 
                 # Interaction Logic
-                # "If BOTH fire: 5% -> 2%"
-                # "Trigger a VoV risk regime ... Scale risk 5% -> 2.5%"
-                # "Correlation Regime ... Scale: 5% -> 3.5%"
-
-                # Let's handle precedence/interaction
-                # Base: 5%
-
                 scaled_msg = ""
 
                 if shock_active and vov_active:
@@ -670,20 +969,47 @@ class PortfolioVolEngine:
                     risk_pct = 0.035
                     scaled_msg = "5% -> 3.5% (Correlation Shock)"
 
-                if verbose:
-                    if vov_active:
-                        print(f"[VoV REGIME ACTIVE]")
-                        print(f"    IV 5d Change:   {vc5:.1%}")
-                        if not pd.isna(vov_90):
-                            print(f"    VoV Value:      {vov_val:.4f}")
-                            print(f"    90th Threshold: {vov_90:.4f}")
-                            print(f"    History Length: {int(vov_count)}")
-                        else:
-                            print(
-                                f"    VoV Check:      Skipped (Insufficient History: {int(vov_count)})"
-                            )
+                # POST-SHOCK COOLDOWN OVERRIDE
+                # Apply 50% scaling if in cooldown
+                # CRITICAL: Only apply VoV scaling if VoV is enabled
+                if cooldown_active:
+                    risk_pct = risk_pct * 0.5
+                    if scaled_msg:
+                        scaled_msg = f"{scaled_msg} + Post-Shock 50%"
+                    else:
+                        scaled_msg = "5% -> 2.5% (Post-Shock Cooldown)"
+                elif vov_active and not vov_enabled:
+                    # VoV triggered but not enabled - do NOT scale
+                    # Reset to base or correlation-only scaling
+                    if shock_active:
+                        risk_pct = 0.035
+                        scaled_msg = "5% -> 3.5% (Correlation Shock)"
+                    else:
+                        risk_pct = 0.05
+                        scaled_msg = ""
 
-                        print(f"    Scaled: {scaled_msg}")
+                if verbose:
+                    # Post-Shock Mode Status
+                    if cooldown_active:
+                        print(f"[POST-SHOCK MODE ACTIVE]")
+                        print(f"    Cooldown Days Remaining: {cooldown_days_remaining}")
+
+                    if vov_active:
+                        if vov_enabled:
+                            print("[VoV REGIME ACTIVE]")
+                            print(f"    IV 5d Change:   {vc5:.1%}")
+                            if not pd.isna(vov_90):
+                                print(f"    VoV Value:      {vov_val:.4f}")
+                                print(f"    90th Threshold: {vov_90:.4f}")
+                                print(
+                                    f"    History Length: {int(vov_count) if pd.notna(vov_count) else 0}"
+                                )
+                            else:
+                                print(
+                                    f"    VoV Check:      Skipped (Insufficient History: {int(vov_count) if pd.notna(vov_count) else 0})"
+                                )
+
+                            print(f"    Scaled: {scaled_msg}")
                     elif (
                         shock_active
                     ):  # Only print correlation if not already covered by dual shock
@@ -728,8 +1054,30 @@ class PortfolioVolEngine:
 
                 candidate_lots = int(min(lots_risk, lots_margin))
 
+                # RULE 4: Minimum Premium Safety
+                if best["Prem"] < 0.005 * spot_entry:
+                    continue
+
+                original_lots = candidate_lots
+
+                # RULE 1: Max 5 lots per symbol
+                candidate_lots = min(candidate_lots, 5)
+
+                # RULE 2: Single trade capital limit
+                trade_premium = best["Prem"] * LOT_SIZE
+                max_lots_by_trade_limit = (
+                    int((0.03 * self.equity) / trade_premium)
+                    if trade_premium > 0
+                    else 0
+                )
+                candidate_lots = min(candidate_lots, max_lots_by_trade_limit)
+
+                # RULE 5: Integer Safety
                 if candidate_lots < 1:
                     continue
+
+                if candidate_lots < original_lots:
+                    print("[LOT SAFETY REDUCTION APPLIED]")
 
                 # Final Hard Cap Check (Redundant if we sized with 65% budget, but specific blocking required)
                 # "If exceeded: Skip... Print [Blocked: Portfolio Margin Cap]"
@@ -807,6 +1155,8 @@ class PortfolioVolEngine:
             print(f"[Risk] Trades Scaled: {trades_scaled}")
             print(f"[Risk] Trades Blocked (Margin): {blocked_margin}")
             print(f"[Risk] VoV Trigger Count: {vov_triggers}")
+            print(f"[Risk] Post-Shock Cooldown Activations: {cooldown_activations}")
+            print(f"[Safety] Kill Switch Activations: {kill_switch_activations}")
 
         return (
             pd.DataFrame(closed_trades),
@@ -818,6 +1168,8 @@ class PortfolioVolEngine:
                 "trades_scaled": trades_scaled,
                 "shock_days": shock_days,
                 "vov_triggers": vov_triggers,
+                "cooldown_activations": cooldown_activations,
+                "kill_switch_activations": kill_switch_activations,
             },
         )
 
@@ -843,7 +1195,7 @@ class PortfolioVolEngine:
         dd = equity_df["Equity"] / equity_df["Equity"].cummax() - 1
         max_dd = dd.min()
 
-        downside = equity[equity["Ret"] < 0]["Ret"].std()
+        downside = equity_df[equity_df["Ret"] < 0]["Ret"].std()
         sortino = (mean_ret / downside) * ann_factor if downside > 0 else 0
 
         print(f"{'Metric':<20} | {'Value':<15}")
@@ -878,4 +1230,67 @@ def run_portfolio_backtest():
     # User said "Output ONLY..."
     # So run silent verbose=False to suppress trade logs?
     # "Log once at the end... No per-trade spam." -> verbose=False for sensitivity check?
-    # But for THIS step user asked for specific logs "When scal
+    # But for THIS step user asked for specific logs "When scaling activates, print..."
+    # So we need verbose=True (or custom verbose logic).
+    # But user also said "No per-trade spam" in PREVIOUS task.
+    # In Step 5 of THIS task: "When scaling activates, print... [Correlation Shock Active]..."
+    # So we should run verbose=True? The previous "No per-trade spam" was for acceleration filter.
+    # Let's run verbose=True to show the logs requested.
+    trades, equity, stats = bt.simulate_portfolio(rv_threshold=0.35, verbose=True)
+
+    # Compute Metrics
+    end_eq = equity["Equity"].iloc[-1]
+
+    equity["Prev"] = equity["Equity"].shift(1).fillna(CAPITAL)
+    equity["Ret"] = equity["Equity"] / equity["Prev"] - 1
+    mean_ret = equity["Ret"].mean()
+    std_ret = equity["Ret"].std()
+    sharpe = (mean_ret / std_ret) * np.sqrt(252) if std_ret > 0 else 0
+
+    downside = equity["Ret"][equity["Ret"] < 0].std()
+    # Correct calculation: downside deviation of returns
+    # Previous code: equity[equity["Ret"] < 0]["Ret"].std()
+    # That works if "Ret" is column.
+
+    sortino = (mean_ret / downside) * np.sqrt(252) if downside > 0 else 0
+
+    dd = equity["Equity"] / equity["Equity"].cummax() - 1
+    max_dd = dd.min()
+
+    print("\n=== FINAL METRICS ===")
+    print(f"Ending Equity:           {end_eq:,.2f}")
+
+    total_return = (end_eq / CAPITAL) - 1.0
+
+    crisis_trades = (
+        trades[trades.get("Is_Crisis", False) == True]
+        if "Is_Crisis" in trades.columns
+        else pd.DataFrame()
+    )
+    crisis_count = len(crisis_trades)
+    crisis_wins = (
+        len(crisis_trades[crisis_trades["PnL_Net"] > 0]) if crisis_count > 0 else 0
+    )
+    crisis_win_rate = crisis_wins / crisis_count if crisis_count > 0 else 0.0
+
+    print(f"Total Return:            {total_return:.2%}")
+    print(f"Sharpe:                  {sharpe:.2f}")
+    print(f"Max Drawdown:            {max_dd:.2%}")
+    print(f"Sortino:                 {sortino:.2f}")
+    print(f"Trades Taken:            {len(trades)}")
+    print(f"Crisis Trades Count:     {crisis_count}")
+    print(f"Crisis Win Rate:         {crisis_win_rate:.2%}")
+    print(f"Trades Scaled:           {stats['trades_scaled']}")
+    print(f"Trades Blocked (Margin): {stats['blocked_margin']}")
+    print(f"VoV Trigger Count:       {stats['vov_triggers']}")
+    print(f"Cooldown Activations:    {stats['cooldown_activations']}")
+    print(f"Kill Switch Activations: {stats['kill_switch_activations']}")
+
+
+if __name__ == "__main__":
+    try:
+        run_portfolio_backtest()
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
