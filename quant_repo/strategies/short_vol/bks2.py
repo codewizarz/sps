@@ -289,11 +289,10 @@ class PortfolioVolEngine:
                     continue
                 exp_idx = date_map[exp]
 
-                # Entry: T-3
+                # Entry: T-3 (3 days before expiry)
                 entry_idx = exp_idx - 3
                 if entry_idx < 0:
                     continue
-
                 entry_date = td[entry_idx]
                 entry_map[entry_date] = exp
 
@@ -461,9 +460,9 @@ class PortfolioVolEngine:
                     worst_val = max(ce_high + pe_low, pe_high + ce_low)
                     stop_val = pos["Premium"] * 2.0
 
-                    # 2. Profit Take (Intraday Best)
+                    # 2. Profit Take
                     best_val = ce_low + pe_low
-                    target_val = pos["Premium"] * 0.30
+                    target_val = pos["Premium"] * 0.3
 
                     if worst_val >= stop_val:
                         exit_signal = True
@@ -635,8 +634,8 @@ class PortfolioVolEngine:
                         if ce.empty or pe.empty:
                             continue
 
-                        ce_entry = ce["ClsPric"].iloc[0]
-                        pe_entry = pe["ClsPric"].iloc[0]
+                        ce_entry = ce["OpnPric"].iloc[0]
+                        pe_entry = pe["OpnPric"].iloc[0]
                         if (
                             ce["OpnIntrst"].iloc[0] < 1000
                             or pe["OpnIntrst"].iloc[0] < 1000
@@ -675,6 +674,24 @@ class PortfolioVolEngine:
                         if risk_per_lot > 0
                         else 0
                     )
+
+                    # Compute margin cap specifically for crisis
+                    cris_rv = (
+                        self.rv_series_map.get(sym, {})
+                        .get("RV", pd.Series())
+                        .get(curr_date, np.nan)
+                    )
+                    if pd.isna(cris_rv):
+                        cris_rv = nifty_rv
+                    margin_per_lot = spot_entry * LOT_SIZE * get_margin_pct(cris_rv)
+
+                    if margin_per_lot > 0:
+                        candidate_lots = min(
+                            candidate_lots, int((self.equity * 0.02) / margin_per_lot)
+                        )
+                    else:
+                        candidate_lots = 0
+
                     if candidate_lots < 1 and self.equity >= risk_per_lot:
                         candidate_lots = 1
 
@@ -897,8 +914,8 @@ class PortfolioVolEngine:
                     if ce.empty or pe.empty:
                         continue
 
-                    ce_entry = ce["ClsPric"].iloc[0]
-                    pe_entry = pe["ClsPric"].iloc[0]
+                    ce_entry = ce["OpnPric"].iloc[0]
+                    pe_entry = pe["OpnPric"].iloc[0]
 
                     # Filters
                     if ce["OpnIntrst"].iloc[0] < 500 or pe["OpnIntrst"].iloc[0] < 500:
@@ -926,6 +943,11 @@ class PortfolioVolEngine:
                     continue
 
                 best = min(candidates, key=lambda x: x["Diff"])
+
+                print("[EXPIRY ENTRY VALIDATED]")
+                print(f"Date: {date_str}")
+                print(f"Expiry: {expiry.strftime('%Y-%m-%d')}")
+                print(f"Strike: {best['Strike']}")
 
                 # Yield Filter
                 yield_pct = (best["Prem"] / spot_entry) * 100
@@ -1032,7 +1054,12 @@ class PortfolioVolEngine:
                         print(f"    Scaled: {scaled_msg}")
 
                 risk_budget = self.equity * risk_pct
-                risk_per_lot = 2 * best["Prem"] * LOT_SIZE
+                days_left = (expiry.date() - curr_date.date()).days
+                days_left = max(
+                    days_left, 1
+                )  # avoid zero division/zero sizing if expiring today
+                expected_move = spot_entry * rv * np.sqrt(days_left / 252)
+                risk_per_lot = expected_move * LOT_SIZE
                 lots_risk = risk_budget // risk_per_lot if risk_per_lot > 0 else 0
 
                 # Check Portfolio Margin Cap (65%)
@@ -1152,9 +1179,34 @@ class PortfolioVolEngine:
                     )
                     print(f"    Margin Used:   {margin_factor:.0%}")
 
+            # ---------- DAILY MARK TO MARKET ----------
+            unrealized_total = 0.0
+
+            for pos in open_positions:
+                sym = pos["Symbol"]
+                expiry = pos["Expiry"]
+
+                price_query = f"""
+                SELECT ClsPric, OptnTp
+                FROM fo_data
+                WHERE TckrSymb='{sym}'
+                  AND StrkPric={pos["Strike"]}
+                  AND TradDt='{date_str}'
+                  AND XpryDt='{expiry.strftime("%Y-%m-%d")}'
+                """
+
+                df_price = self.con.execute(price_query).df()
+
+                if len(df_price) == 2:
+                    current_val = df_price["ClsPric"].sum()
+                    unreal = (pos["Premium"] - current_val) * (pos["Size"])
+                    unrealized_total += unreal
+
+            marked_equity = self.equity + unrealized_total
+
             # End of Day
             # Track Equity
-            equity_curve.append({"Date": date_str, "Equity": self.equity})
+            equity_curve.append({"Date": date_str, "Equity": marked_equity})
             self.portfolio_returns.append(0.0)  # Placeholder, calc later or diff
 
         elapsed = time.perf_counter() - t0_start
@@ -1196,7 +1248,7 @@ class PortfolioVolEngine:
 
         # Calculates Returns based on Equity Curve
         equity_df["Prev"] = equity_df["Equity"].shift(1).fillna(CAPITAL)
-        equity_df["Ret"] = equity_df["Equity"] / equity_df["Prev"] - 1
+        equity_df["Ret"] = equity_df["Equity"].pct_change().fillna(0)
 
         # Portfolio Metrics
         mean_ret = equity_df["Ret"].mean()

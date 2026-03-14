@@ -1,0 +1,2 @@
+stop_loss_multiple,profit_target_pct,max_lots_cap,trailing_stop_activation,trailing_stop_distance,base_risk_pct,Return_Pct,Max_DD_Pct,Return_to_DD,Win_Rate
+1.4,0.65,150,0.2,0.15,0.05,20.515003,6.494618523414906,3.1587695459530702,58.06451612903226

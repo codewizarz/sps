@@ -1,0 +1,6 @@
+pandas
+numpy
+yfinance
+ta
+requests
+# sqlite3 is part of the Python standard library and does not need to be installed via pip
