@@ -53,6 +53,7 @@ class ExecutionEngine:
         slippage_pct: float = 0.005,      # 0.5% default
         brokerage_per_lot: float = 25.0,
         stt_pct: float = 0.0005,
+        telegram=None,
     ):
         self.logger = logger
         self.slippage_pct = slippage_pct
@@ -60,6 +61,7 @@ class ExecutionEngine:
         self.stt_pct = stt_pct
         self.fills: List[SimulatedFill] = []
         self._trade_counter = 0
+        self.telegram = telegram  # Optional TelegramManager
 
     def execute_entry(
         self,
@@ -123,6 +125,14 @@ class ExecutionEngine:
             f"Premium {premium:.2f} → Fill {fill_price:.2f} | "
             f"Lots {lots}×{lot_qty} | {regime}"
         )
+
+        # Telegram alert
+        if self.telegram:
+            self.telegram.send_trade_entry({
+                "symbol": symbol, "strike": strike, "premium": premium,
+                "fill_price": fill_price, "lots": lots, "lot_qty": lot_qty,
+                "regime": regime, "position_scale": position_scale,
+            })
 
         return fill
 
@@ -193,6 +203,13 @@ class ExecutionEngine:
             f"Price {current_price:.2f} → Fill {fill_price:.2f} | "
             f"PnL Rs {net_pnl:+,.0f} | {exit_reason}"
         )
+
+        # Telegram alert
+        if self.telegram:
+            self.telegram.send_trade_exit({
+                "symbol": symbol, "strike": strike, "exit_reason": exit_reason,
+                "net_pnl": net_pnl, "equity": 0,  # filled by caller if needed
+            })
 
         return fill
 

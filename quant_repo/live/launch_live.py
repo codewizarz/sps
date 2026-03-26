@@ -249,6 +249,14 @@ class LiveOperator:
         self._first_trade_validated = False
         self._trader = None
 
+        # Telegram integration
+        from quant_repo.live.telegram_bot import create_telegram_manager
+        self.telegram = create_telegram_manager(health_interval=300)
+        if self.telegram.enabled:
+            _log("TELEGRAM", "Bot connected — alerts enabled")
+        else:
+            _log("TELEGRAM", "Not configured — alerts disabled")
+
     def run(self):
         """Start live paper trading with self-healing."""
         self._running = True
@@ -256,6 +264,12 @@ class LiveOperator:
 
         signal.signal(signal.SIGINT, self._shutdown_handler)
         signal.signal(signal.SIGTERM, self._shutdown_handler)
+
+        # Wire up Telegram command callbacks
+        self.telegram.set_status_callback(self._telegram_status)
+        self.telegram.set_pnl_callback(self._telegram_pnl)
+        self.telegram.set_positions_callback(self._telegram_positions)
+        self.telegram.start()
 
         _log("STATUS", "▶ Starting live paper trading")
         _log("STATUS", f"  Client: {self.env['CLIENT_CODE']}")
@@ -271,9 +285,11 @@ class LiveOperator:
                 self._crash_count += 1
                 _log("ERROR", f"Session crash #{self._crash_count}: {e}")
                 traceback.print_exc()
+                self.telegram.send_error(str(e), f"crash #{self._crash_count}")
 
                 if self._crash_count >= self._max_crashes:
                     _log("ERROR", f"🚨 Max crashes ({self._max_crashes}) reached — STOPPING")
+                    self.telegram.send_error(f"Max crashes reached ({self._max_crashes})", "STOPPED")
                     break
 
                 _log("STATUS", f"♻ Self-healing: restarting in 10s (crash {self._crash_count}/{self._max_crashes})")
@@ -285,10 +301,21 @@ class LiveOperator:
                     self.session = auth_test(self.env, max_retries=2)
                 except SystemExit:
                     _log("ERROR", "Re-auth failed — cannot restart")
+                    self.telegram.send_error("Re-auth failed", "cannot restart")
                     break
 
         _log("STATUS", "■ Paper trading stopped")
         self._print_final_summary()
+        # Send Telegram shutdown summary
+        if self._trader:
+            t = self._trader
+            self.telegram.stop({
+                "equity": t.positions.equity,
+                "closed_pnl": t.positions.closed_pnl,
+                "fills": t.engine.total_fills,
+            })
+        else:
+            self.telegram.stop()
 
     def _run_session(self):
         """Single paper trading session."""
@@ -305,6 +332,9 @@ class LiveOperator:
             password=self.env["PASSWORD"],
             totp_secret=self.env["TOTP_SECRET"],
         )
+
+        # Inject Telegram into execution engine
+        self._trader.engine.telegram = self.telegram
 
         # Override the main loop to inject monitoring
         trader = self._trader
@@ -326,10 +356,11 @@ class LiveOperator:
                 trader._check_entries(snap)
                 trader._record_pnl(snap)
 
-                # STEP 6+8+9: Monitoring
+                # STEP 6+8+9: Monitoring + Telegram health ping
                 self._monitor_health(trader)
                 self._validate_trades(trader)
                 self._check_risk_controls(trader)
+                self._telegram_health_ping(trader)
 
                 # STEP 11: Dashboard
                 trader._print_dashboard(snap)
@@ -365,7 +396,7 @@ class LiveOperator:
         if self._last_tick_time and (now - self._last_tick_time).seconds > 10:
             _log("HEALTH", "⚠ No ticks for >10 seconds — feed may be stale")
 
-        # 5-minute health report
+        # 5-minute health report (console)
         if (now - self._last_health_report).seconds >= self._health_interval:
             self._last_health_report = now
             self._print_health_report(trader)
@@ -465,6 +496,7 @@ class LiveOperator:
         # Kill switch
         if pm.kill_switch_active:
             _log("RISK", f"🚨 KILL SWITCH ACTIVE — DD: {pm.drawdown_pct:.2f}%")
+            self.telegram.send_kill_switch(pm.drawdown_pct)
 
     # ── Shutdown ────────────────────────────────────────────────────────
 
@@ -492,6 +524,85 @@ class LiveOperator:
         _log("STATUS", f"  Total fills      : {t.engine.total_fills}")
         _log("STATUS", f"  Max drawdown     : {t.positions.drawdown_pct:.2f}%")
         _log("STATUS", "═" * 50)
+
+    # ── Telegram Callbacks ──────────────────────────────────────────────
+
+    def _get_regime(self) -> str:
+        if not self._trader:
+            return "?"
+        for sym in self._trader.strategy.config.symbols:
+            vf = self._trader.strategy.get_vol_features(sym)
+            if vf:
+                rv = vf["rv20"]
+                lo = vf["rv_low_thresh"]
+                hi = vf["rv_high_thresh"]
+                return "LOW" if rv < lo else ("HIGH" if rv > hi else "NORMAL")
+        return "?"
+
+    def _telegram_status(self) -> str:
+        if not self._trader:
+            return "📊 Trader not initialized yet"
+        t = self._trader
+        uptime = datetime.now() - self._start_time
+        h = int(uptime.total_seconds() // 3600)
+        m = int((uptime.total_seconds() % 3600) // 60)
+        return (
+            f"📊 <b>STATUS</b>\n"
+            f"State: <code>{'🟢 RUNNING' if self._running else '🔴 STOPPED'}</code>\n"
+            f"Regime: <code>{self._get_regime()}</code>\n"
+            f"Equity: <code>₹{t.positions.equity:,.0f}</code>\n"
+            f"Open PnL: <code>₹{t.positions.open_pnl:+,.0f}</code>\n"
+            f"Closed PnL: <code>₹{t.positions.closed_pnl:+,.0f}</code>\n"
+            f"DD: <code>{t.positions.drawdown_pct:.2f}%</code>\n"
+            f"Positions: <code>{t.positions.active_position_count}</code>\n"
+            f"Trades today: <code>{t.positions.trades_today}</code>\n"
+            f"Ticks: <code>{self._tick_count:,}</code>\n"
+            f"Uptime: <code>{h}h {m}m</code>\n"
+            f"Kill switch: <code>{'🚨 ACTIVE' if t.positions.kill_switch_active else '✅ OFF'}</code>"
+        )
+
+    def _telegram_pnl(self) -> str:
+        if not self._trader:
+            return "💰 Trader not initialized"
+        t = self._trader
+        return (
+            f"💰 <b>PnL SUMMARY</b>\n"
+            f"Equity: <code>₹{t.positions.equity:,.0f}</code>\n"
+            f"Open PnL: <code>₹{t.positions.open_pnl:+,.0f}</code>\n"
+            f"Closed PnL: <code>₹{t.positions.closed_pnl:+,.0f}</code>\n"
+            f"Daily return: <code>{t.positions.daily_return_pct:+.4f}%</code>\n"
+            f"Drawdown: <code>{t.positions.drawdown_pct:.2f}%</code>\n"
+            f"Total fills: <code>{t.engine.total_fills}</code>"
+        )
+
+    def _telegram_positions(self) -> str:
+        if not self._trader:
+            return "📋 Trader not initialized"
+        positions = self._trader.positions.get_position_summaries()
+        if not positions:
+            return "📋 No active positions"
+        lines = ["📋 <b>ACTIVE POSITIONS</b>\n"]
+        for p in positions:
+            emoji = "🟢" if p["unrealized_pnl"] >= 0 else "🔴"
+            lines.append(
+                f"{emoji} <code>{p['symbol']}</code> {p['strike']:.0f}\n"
+                f"   Lots: {p['lots']} | PnL: ₹{p['unrealized_pnl']:+,.0f} ({p['pnl_pct']:+.1f}%)\n"
+                f"   DTE: {p['dte']} | Stop: stage {p['stop_stage']}"
+            )
+        return "\n".join(lines)
+
+    def _telegram_health_ping(self, trader):
+        """Send Telegram health ping (rate-limited by TelegramManager)."""
+        self.telegram.maybe_send_health_ping({
+            "status": "RUNNING" if self._running else "STOPPED",
+            "regime": self._get_regime(),
+            "positions": trader.positions.active_position_count,
+            "equity": trader.positions.equity,
+            "open_pnl": trader.positions.open_pnl,
+            "closed_pnl": trader.positions.closed_pnl,
+            "drawdown_pct": trader.positions.drawdown_pct,
+            "trades_today": trader.positions.trades_today,
+        })
 
 
 # ── Logging helpers ─────────────────────────────────────────────────────
