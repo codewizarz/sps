@@ -1,0 +1,187 @@
+{
+  "original_backtest": {
+    "Final_Equity": 16686000.35,
+    "Total_Return_Pct": 66.86,
+    "Sharpe": 2.682,
+    "Sortino": 2.322,
+    "Max_Drawdown_Pct": 8.89,
+    "Calmar": 7.52,
+    "Return_DD": 7.52,
+    "Profit_Factor": 2.731,
+    "Win_Rate_Pct": 56.86,
+    "Total_Trades": 51,
+    "Rolling_Sharpe_30D_Last": 0.26
+  },
+  "walk_forward": [
+    {
+      "window": "WF_2024train_2025test",
+      "train_period": "2024-01-01 to 2024-12-31",
+      "test_period": "2025-01-01 to 2025-12-31",
+      "return_pct": 66.2,
+      "max_dd_pct": 8.89,
+      "sharpe": 3.11,
+      "sortino": 2.843,
+      "calmar": 7.445,
+      "win_rate_pct": 58.7,
+      "trades": 46,
+      "profit_factor": 3.456,
+      "is_forward": false,
+      "dd_breach": false,
+      "sharpe_breach": false
+    },
+    {
+      "window": "WF_2024H2train_2025test",
+      "train_period": "2024-06-01 to 2024-12-31",
+      "test_period": "2025-01-01 to 2025-12-31",
+      "return_pct": 66.2,
+      "max_dd_pct": 8.89,
+      "sharpe": 3.11,
+      "sortino": 2.843,
+      "calmar": 7.445,
+      "win_rate_pct": 58.7,
+      "trades": 46,
+      "profit_factor": 3.456,
+      "is_forward": false,
+      "dd_breach": false,
+      "sharpe_breach": false
+    },
+    {
+      "window": "WF_2025train_2026forward",
+      "train_period": "2025-01-01 to 2025-12-31",
+      "test_period": "2026-01-01 to 2026-03-26",
+      "return_pct": 1.27,
+      "max_dd_pct": 4.77,
+      "sharpe": 0.583,
+      "sortino": 0.856,
+      "calmar": 0.267,
+      "win_rate_pct": 40.0,
+      "trades": 5,
+      "profit_factor": 1.182,
+      "is_forward": true,
+      "dd_breach": false,
+      "sharpe_breach": true
+    }
+  ],
+  "stress_test": [
+    {
+      "regime": "LOW_VOL",
+      "trades": 35,
+      "return_pct": 52.128,
+      "win_rate_pct": 57.14,
+      "avg_pnl": 148936.0,
+      "total_pnl": 5212751.0,
+      "max_dd_pct": 6.88,
+      "profit_factor": 2.718,
+      "wins": 20,
+      "losses": 15,
+      "dd_breach": false,
+      "regime_failed": false
+    },
+    {
+      "regime": "NORMAL_VOL",
+      "trades": 12,
+      "return_pct": 14.644,
+      "win_rate_pct": 66.67,
+      "avg_pnl": 122030.0,
+      "total_pnl": 1464361.0,
+      "max_dd_pct": 7.49,
+      "profit_factor": 2.836,
+      "wins": 8,
+      "losses": 4,
+      "dd_breach": false,
+      "regime_failed": false
+    },
+    {
+      "regime": "HIGH_VOL",
+      "trades": 4,
+      "return_pct": 0.089,
+      "win_rate_pct": 25.0,
+      "avg_pnl": 2222.0,
+      "total_pnl": 8889.0,
+      "max_dd_pct": 0.3,
+      "profit_factor": 1.283,
+      "wins": 1,
+      "losses": 3,
+      "dd_breach": false,
+      "regime_failed": false
+    },
+    {
+      "regime": "GAP_DAYS",
+      "trades": 2,
+      "return_pct": 1.159,
+      "win_rate_pct": 100.0,
+      "avg_pnl": 57945.0,
+      "total_pnl": 115890.0,
+      "max_dd_pct": 0.0,
+      "profit_factor": Infinity,
+      "wins": 2,
+      "losses": 0,
+      "dd_breach": false,
+      "regime_failed": false
+    }
+  ],
+  "monte_carlo": {
+    "summary": {
+      "runs": 500,
+      "return_mean": 66.88,
+      "return_std": 1.32,
+      "return_p5": 64.74,
+      "return_p25": 66.04,
+      "return_p50": 66.87,
+      "return_p75": 67.77,
+      "return_p95": 69.05,
+      "return_worst": 62.05,
+      "return_best": 71.08,
+      "dd_mean": 8.92,
+      "dd_std": 2.64,
+      "dd_p5": 5.49,
+      "dd_p50": 8.38,
+      "dd_p95": 14.44,
+      "dd_worst": 19.81,
+      "pct_runs_dd_breach": 0.0,
+      "sharpe_mean": 5.296,
+      "sharpe_p5": 5.168
+    },
+    "worst_case": {
+      "return_pct": 62.046,
+      "max_drawdown_pct": 19.807
+    }
+  },
+  "realistic_execution": {
+    "Total_Return_Pct": 60.51,
+    "Max_Drawdown_Pct": 7.73,
+    "Sharpe": 4.786,
+    "Win_Rate_Pct": 56.86,
+    "Profit_Factor": 2.458,
+    "Total_Trades": 51,
+    "Total_Penalty_Rs": 634787.0,
+    "Final_Equity": 16051213.0
+  },
+  "evaluation": {
+    "is_robust": false,
+    "expected_return_range": [
+      1.27,
+      69.05
+    ],
+    "expected_drawdown_range": [
+      4.77,
+      19.81
+    ],
+    "failure_conditions": [
+      "Forward period Sharpe 0.583 < 1.0"
+    ],
+    "recommendation": "refine",
+    "safety_rules_passed": false,
+    "base_return_pct": 66.86,
+    "base_sharpe": 2.682,
+    "base_max_dd_pct": 8.89,
+    "realistic_return_pct": 60.51,
+    "realistic_max_dd_pct": 7.73,
+    "mc_p5_return": 64.74,
+    "mc_p95_return": 69.05,
+    "mc_worst_dd": 19.81,
+    "mc_pct_runs_dd_breach": 0.0
+  },
+  "run_timestamp": "2026-03-26T15:03:11.142598Z",
+  "strategy_path": "/Users/Balu/SPS/quant_repo/strategies/short_vol/meow_final_boss.py"
+}

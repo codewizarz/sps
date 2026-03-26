@@ -1,0 +1,13 @@
+{
+  "Final_Equity": 13139418.56,
+  "Total_Return_Pct": 31.39,
+  "Sharpe": 1.442,
+  "Sortino": 1.115,
+  "Max_Drawdown_Pct": 13.47,
+  "Calmar": 2.331,
+  "Return_DD": 2.331,
+  "Profit_Factor": 1.566,
+  "Win_Rate_Pct": 59.09,
+  "Total_Trades": 44,
+  "Rolling_Sharpe_30D_Last": -0.533
+}

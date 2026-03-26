@@ -1,0 +1,5 @@
+regime,trades,return_pct,win_rate_pct,avg_pnl,total_pnl,max_dd_pct,profit_factor,wins,losses,dd_breach,regime_failed
+LOW_VOL,36,38.042,55.56,105672.0,3804207.0,6.64,2.607,20,16,False,False
+NORMAL_VOL,12,6.743,66.67,56189.0,674265.0,7.87,1.796,8,4,False,False
+HIGH_VOL,4,0.046,25.0,1149.0,4595.0,0.13,1.335,1,3,False,False
+GAP_DAYS,2,0.488,100.0,24423.0,48846.0,0.0,inf,2,0,False,False

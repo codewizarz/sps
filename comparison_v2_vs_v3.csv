@@ -1,0 +1,12 @@
+Metric,V2,V3,Delta
+Final_Equity,13909618.0,16398083.56,2488465.56
+Total_Return_Pct,39.1,63.98,24.88
+Sharpe,1.509,3.064,1.555
+Sortino,0.961,2.885,1.924
+Max_Drawdown_Pct,19.28,7.83,-11.45
+Calmar,2.028,8.174,6.146
+Return_DD,2.028,8.174,6.146
+Profit_Factor,1.59,2.979,1.389
+Win_Rate_Pct,70.73,57.78,-12.95
+Total_Trades,41.0,45.0,4.0
+Rolling_Sharpe_30D_Last,-3.083,0.256,3.339

@@ -1,0 +1,1 @@
+timestamp,trade_id,symbol,action,strike,premium,lots,lot_qty,slippage_adjusted_price,side,regime,exit_reason,gross_pnl,net_pnl,position_scale,quality_score
