@@ -338,7 +338,8 @@ class LiveOperator:
 
         # Override the main loop to inject monitoring
         trader = self._trader
-        trader.feed.register_callback(self._on_tick_monitor)
+        trader.feed.register_callback(trader._on_tick)          # ← CRITICAL: feed prices into strategy
+        trader.feed.register_callback(self._on_tick_monitor)    # health monitoring
         trader.feed.start()
         time.sleep(3)
         trader._running = True

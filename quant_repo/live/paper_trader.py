@@ -39,6 +39,7 @@ from quant_repo.live.market_feed import (
     MarketSnapshot, SimulatedFeed, Tick, create_feed,
 )
 from quant_repo.live.execution_engine import ExecutionEngine
+from quant_repo.live.feature_engine import FeatureEngine
 from quant_repo.live.position_manager import (
     PaperPosition, PositionManager, RiskLimits,
 )
@@ -252,6 +253,13 @@ class PaperTrader:
             symbols=list(self.strategy.config.symbols),
         )
 
+        # Feature engine (diagnostic companion — independent RV20 logging)
+        self.feature_engine = FeatureEngine(maxlen=500)
+        self._feature_ready_logged = False
+
+        # Telegram (may be injected later by LiveOperator)
+        self.telegram = None
+
         # State
         self._last_signal_check = datetime.min
         self._signal_cooldown_seconds = max(tick_interval * 2, 10)
@@ -277,6 +285,26 @@ class PaperTrader:
 
         # Update strategy price buffer
         self.strategy.update_price(tick.symbol, tick.ltp)
+
+        # Update diagnostic feature engine
+        self.feature_engine.update(tick.ltp, tick.timestamp)
+
+        if not self.feature_engine.is_ready():
+            # Log warmup progress every 5 ticks to avoid spam
+            buf_len = len(self.feature_engine.prices)
+            if buf_len % 5 == 0 or buf_len == 1:
+                self.logger.info(f"[FEATURE] Warming up... ({buf_len}/30)")
+            return
+
+        # One-time Telegram alert when feature engine becomes ready
+        if not self._feature_ready_logged:
+            self._feature_ready_logged = True
+            self.logger.info("[FEATURE] ✅ Feature engine ready — regime detection active")
+            if self.telegram and hasattr(self.telegram, 'send'):
+                try:
+                    self.telegram.send("✅ Feature engine ready — regime detection active")
+                except Exception:
+                    pass
 
     # ── Main loop ───────────────────────────────────────────────────────
 
@@ -389,6 +417,14 @@ class PaperTrader:
 
         active_symbols = [p.symbol for p in self.positions.positions]
 
+        # Log feature engine status
+        features = self.feature_engine.compute_features()
+        if features:
+            self.logger.info(
+                f"[FEATURE] Buffer={len(self.feature_engine.prices)} "
+                f"RV20={features['rv20']:.4f}"
+            )
+
         for symbol in self.strategy.config.symbols:
             if symbol in active_symbols:
                 continue
@@ -398,6 +434,15 @@ class PaperTrader:
                 else snap.banknifty_spot
             )
             if spot <= 0:
+                continue
+
+            # Log strategy vol features for this symbol
+            vf = self.strategy.get_vol_features(symbol)
+            if vf is None:
+                buf_len = len(self.strategy._price_buffers.get(symbol, []))
+                self.logger.info(
+                    f"[FEATURE] {symbol} strategy buffer warming up ({buf_len}/25)"
+                )
                 continue
 
             signal = self.strategy.generate_signal(
@@ -410,6 +455,12 @@ class PaperTrader:
                 ),
                 current_dd_pct=self.positions.drawdown_pct,
                 active_symbols=active_symbols,
+            )
+
+            # Log regime regardless of signal
+            self.logger.info(
+                f"[REGIME] {symbol} | RV20={vf['rv20']:.4f} | "
+                f"Regime={'LOW' if vf['rv20'] < vf['rv_low_thresh'] else ('HIGH' if vf['rv20'] > vf['rv_high_thresh'] else 'NORMAL')}"
             )
 
             if signal is not None:
