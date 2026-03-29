@@ -28,14 +28,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+# Ensure project root is importable
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT))
+
 from quant_repo.live.market_hours import (
     is_market_open, is_square_off_time, is_trading_day,
     market_status, now_ist,
 )
-
-# Ensure project root is importable
-ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(ROOT))
 
 # ── STEP 1: ENV + TOTP ─────────────────────────────────────────────────
 
