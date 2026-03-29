@@ -40,6 +40,7 @@ from quant_repo.live.market_feed import (
 )
 from quant_repo.live.execution_engine import ExecutionEngine
 from quant_repo.live.feature_engine import FeatureEngine
+from quant_repo.live.market_hours import is_market_open
 from quant_repo.live.position_manager import (
     PaperPosition, PositionManager, RiskLimits,
 )
@@ -405,6 +406,10 @@ class PaperTrader:
     def _check_entries(self, snap: MarketSnapshot):
         """Generate entry signals from strategy."""
         now = datetime.now()
+
+        # ── MARKET HOURS GUARD ──────────────────────────────────────
+        if not is_market_open():
+            return  # silently skip — logged at operator level
 
         # Signal cooldown
         if (now - self._last_signal_check).seconds < self._signal_cooldown_seconds:

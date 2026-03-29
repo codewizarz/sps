@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from quant_repo.live.logger import PaperLogger
+from quant_repo.live.market_hours import is_market_open
 
 
 @dataclass
@@ -79,6 +80,15 @@ class ExecutionEngine:
         For short selling, slippage works against us: we receive LESS premium.
         fill_price = premium * (1 - slippage)
         """
+        # ── HARD SAFETY BLOCK ───────────────────────────────────────
+        if not is_market_open():
+            self.logger.error(
+                f"[BLOCK] ENTRY BLOCKED — market closed | {symbol} {strike:.0f}"
+            )
+            raise RuntimeError(
+                f"Market closed — execution blocked for {symbol} {strike:.0f}"
+            )
+
         self._trade_counter += 1
         fill_price = premium * (1.0 - self.slippage_pct)
 

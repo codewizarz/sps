@@ -28,6 +28,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+from quant_repo.live.market_hours import (
+    is_market_open, is_square_off_time, is_trading_day,
+    market_status, now_ist,
+)
+
 # Ensure project root is importable
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
@@ -249,6 +254,12 @@ class LiveOperator:
         self._first_trade_validated = False
         self._trader = None
 
+        # Market hours state tracking
+        self._market_was_open = False          # track transitions
+        self._square_off_done_today = False    # once-per-day flag
+        self._last_market_log = datetime.min   # rate-limit market status logs
+        self._last_block_log = datetime.min    # rate-limit block logs
+
         # Telegram integration
         from quant_repo.live.telegram_bot import create_telegram_manager
         self.telegram = create_telegram_manager(health_interval=300)
@@ -333,8 +344,9 @@ class LiveOperator:
             totp_secret=self.env["TOTP_SECRET"],
         )
 
-        # Inject Telegram into execution engine
+        # Inject Telegram into execution engine + paper trader
         self._trader.engine.telegram = self.telegram
+        self._trader.telegram = self.telegram
 
         # Override the main loop to inject monitoring
         trader = self._trader
@@ -345,25 +357,49 @@ class LiveOperator:
         trader._running = True
         self._running = True
 
+        # Clean up any positions opened outside market hours (startup safety)
+        self._cleanup_invalid_positions(trader)
+
         _log("STATUS", "✅ Session started — entering main loop")
+
+        # Log initial market status
+        emoji, status_text = market_status()
+        _log("MARKET", f"{emoji} {status_text}")
 
         while trader._running and self._running:
             try:
+                # ── MARKET HOURS AWARENESS ──────────────────────────
+                market_open = is_market_open()
+
+                # Detect market open/close transitions
+                self._handle_market_transitions(market_open, trader)
+
+                # Auto square-off at 15:20 IST
+                self._handle_square_off(trader)
+
                 snap = trader.feed.snapshot
 
-                # Core trading loop steps
-                trader._update_position_prices(snap)
-                trader._check_exits(snap)
-                trader._check_entries(snap)
-                trader._record_pnl(snap)
+                if market_open:
+                    # Full trading loop — only during market hours
+                    trader._update_position_prices(snap)
+                    trader._check_exits(snap)
+                    trader._check_entries(snap)
+                    trader._record_pnl(snap)
+                else:
+                    # Weekend/after-hours freeze — only status reporting
+                    now = datetime.now()
+                    if (now - self._last_block_log).seconds >= 300:
+                        self._last_block_log = now
+                        emoji, status_text = market_status()
+                        _log("MARKET", f"{emoji} {status_text} — trading frozen")
 
-                # STEP 6+8+9: Monitoring + Telegram health ping
+                # Monitoring always runs (even outside hours)
                 self._monitor_health(trader)
                 self._validate_trades(trader)
                 self._check_risk_controls(trader)
                 self._telegram_health_ping(trader)
 
-                # STEP 11: Dashboard
+                # Dashboard always runs
                 trader._print_dashboard(snap)
 
                 time.sleep(trader.tick_interval)
@@ -373,11 +409,76 @@ class LiveOperator:
                 break
             except Exception as e:
                 _log("ERROR", f"Loop iteration error: {e}")
+                import traceback as tb
+                tb.print_exc()
                 time.sleep(trader.tick_interval)
 
         # Cleanup
         _log("STATUS", "Shutting down session...")
         trader._shutdown()
+
+    # ── Market Transition Handling ──────────────────────────────────────
+
+    def _handle_market_transitions(self, market_open: bool, trader):
+        """Detect market open/close transitions and send alerts."""
+        if market_open and not self._market_was_open:
+            # Market just opened
+            self._market_was_open = True
+            self._square_off_done_today = False  # reset daily flag
+            _log("MARKET", "🟢 MARKET OPEN — trading enabled")
+            self.telegram.send("🟢 Market OPEN — trading enabled")
+
+        elif not market_open and self._market_was_open:
+            # Market just closed
+            self._market_was_open = False
+            _log("MARKET", "🔴 MARKET CLOSED — trading disabled")
+            self.telegram.send("🔴 Market CLOSED — trading disabled")
+
+    def _handle_square_off(self, trader):
+        """Auto square-off at 15:20 IST."""
+        if self._square_off_done_today:
+            return
+        if not is_square_off_time():
+            return
+
+        self._square_off_done_today = True
+        positions = trader.positions.positions
+        if not positions:
+            _log("SQUARE_OFF", "No open positions — nothing to close")
+            return
+
+        count = len(positions)
+        _log("SQUARE_OFF", f"📉 EOD auto square-off — closing {count} position(s)")
+        trader.positions.close_all("EOD_SQUARE_OFF")
+        _log("SQUARE_OFF", f"✅ Closed {count} position(s)")
+        self.telegram.send(
+            f"📉 EOD Square-Off: Closed {count} position(s)\n"
+            f"Closed PnL: ₹{trader.positions.closed_pnl:+,.0f}"
+        )
+
+    def _cleanup_invalid_positions(self, trader):
+        """Close any positions opened outside market hours on startup."""
+        invalid = []
+        for pos in trader.positions.positions:
+            entry_hour = pos.entry_time.hour if hasattr(pos, 'entry_time') else -1
+            entry_min = pos.entry_time.minute if hasattr(pos, 'entry_time') else -1
+            # Check if opened before 09:15 or after 15:30
+            if hasattr(pos, 'entry_time'):
+                t = pos.entry_time.time()
+                from datetime import time as dt_time
+                if t < dt_time(9, 15) or t >= dt_time(15, 30):
+                    invalid.append(pos)
+                    _log("CLEANUP", f"Invalid position found: {pos.symbol} {pos.strike} opened at {pos.entry_time}")
+
+        if invalid:
+            _log("CLEANUP", f"Closing {len(invalid)} position(s) opened outside market hours")
+            trader.positions.close_all("INVALID_SESSION_CLEANUP")
+            self.telegram.send(
+                f"🧹 Startup cleanup: Closed {len(invalid)} invalid position(s) "
+                f"(opened outside market hours)"
+            )
+        else:
+            _log("CLEANUP", "✅ No invalid positions found")
 
     # ── STEP 6: Health Monitoring ───────────────────────────────────────
 
