@@ -68,6 +68,7 @@ class LiveStrategy:
 
     def on_tick(self, price, features, timestamp):
         logger.info("[DEBUG] Strategy on_tick called")
+        logger.info(f"[DEBUG] Features: {features}")
 
         # Extract features
         rv20 = features.get("rv20")

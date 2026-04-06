@@ -1,0 +1,2 @@
+[console_scripts]
+rto = reasoning_trace_optimizer.cli:main

@@ -25,6 +25,7 @@ SmartWebSocketV2 key tokens:
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -37,6 +38,9 @@ try:
     HAS_SMARTAPI = True
 except ImportError:
     HAS_SMARTAPI = False
+
+
+logger = logging.getLogger(__name__)
 
 
 # ── Data structures ─────────────────────────────────────────────────────
@@ -207,6 +211,7 @@ class SimulatedFeed:
 
     def _dispatch(self, tick: Tick):
         """Send tick to all registered callbacks and update snapshot."""
+        logger.info(f"[FEED] Tick received: {tick.ltp}")
         if tick.symbol == "NIFTY" and not tick.is_option:
             self._snapshot.nifty_spot = tick.ltp
         elif tick.symbol == "BANKNIFTY" and not tick.is_option:
@@ -377,6 +382,7 @@ class AngelOneFeed:
         self._running = False
 
     def _dispatch(self, tick: Tick):
+        logger.info(f"[FEED] Tick received: {tick.ltp}")
         if tick.symbol == "NIFTY" and not tick.is_option:
             self._snapshot.nifty_spot = tick.ltp
         elif tick.symbol == "BANKNIFTY" and not tick.is_option:

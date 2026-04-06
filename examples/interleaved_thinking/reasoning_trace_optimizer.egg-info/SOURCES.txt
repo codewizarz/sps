@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+reasoning_trace_optimizer/__init__.py
+reasoning_trace_optimizer/analyzer.py
+reasoning_trace_optimizer/capture.py
+reasoning_trace_optimizer/cli.py
+reasoning_trace_optimizer/loop.py
+reasoning_trace_optimizer/models.py
+reasoning_trace_optimizer/optimizer.py
+reasoning_trace_optimizer/skill_generator.py
+reasoning_trace_optimizer.egg-info/PKG-INFO
+reasoning_trace_optimizer.egg-info/SOURCES.txt
+reasoning_trace_optimizer.egg-info/dependency_links.txt
+reasoning_trace_optimizer.egg-info/entry_points.txt
+reasoning_trace_optimizer.egg-info/requires.txt
+reasoning_trace_optimizer.egg-info/top_level.txt
+tests/test_models.py
