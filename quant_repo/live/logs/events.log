@@ -1907,3 +1907,123 @@
 2026-04-06 11:16:01,309 | INFO    | [FEATURE] BANKNIFTY strategy buffer warming up (1/25)
 2026-04-06 11:16:11,442 | INFO    | [FEATURE] NIFTY strategy buffer warming up (1/25)
 2026-04-06 11:16:11,442 | INFO    | [FEATURE] BANKNIFTY strategy buffer warming up (1/25)
+2026-04-06 11:53:57,458 | INFO    | ============================================================
+2026-04-06 11:53:57,458 | INFO    | PAPER TRADER STARTING
+2026-04-06 11:53:57,458 | INFO    | Strategy: /Users/Balu/SPS/quant_repo/strategies/short_vol/v4_regime_generalized.py
+2026-04-06 11:53:57,458 | INFO    | Capital : Rs 10,000,000
+2026-04-06 11:53:57,458 | INFO    | Mode    : SimulatedFeed
+2026-04-06 11:53:57,458 | INFO    | Interval: 1.0s
+2026-04-06 11:53:57,459 | INFO    | ============================================================
+2026-04-06 11:53:57,673 | INFO    | [DEBUG] Tick received: NIFTY @ 25693.700000000197
+2026-04-06 11:53:57,674 | INFO    | [FEATURE] NIFTY warming up... (1/30)
+2026-04-06 11:53:57,674 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:53:57,867 | INFO    | [DEBUG] Tick received: BANKNIFTY @ 60120.54999999931
+2026-04-06 11:53:57,867 | INFO    | [FEATURE] BANKNIFTY warming up... (1/30)
+2026-04-06 11:53:57,868 | INFO    | [BLOCKED] BANKNIFTY feature engine not ready
+2026-04-06 11:54:00,461 | INFO    | [FEATURE] NIFTY strategy buffer warming up (1/25)
+2026-04-06 11:54:00,461 | INFO    | [FEATURE] BANKNIFTY strategy buffer warming up (1/25)
+2026-04-06 11:54:10,599 | INFO    | [FEATURE] NIFTY strategy buffer warming up (1/25)
+2026-04-06 11:54:10,599 | INFO    | [FEATURE] BANKNIFTY strategy buffer warming up (1/25)
+2026-04-06 11:54:20,736 | INFO    | [FEATURE] NIFTY strategy buffer warming up (1/25)
+2026-04-06 11:54:20,742 | INFO    | [FEATURE] BANKNIFTY strategy buffer warming up (1/25)
+2026-04-06 11:54:30,878 | INFO    | [FEATURE] NIFTY strategy buffer warming up (1/25)
+2026-04-06 11:54:30,878 | INFO    | [FEATURE] BANKNIFTY strategy buffer warming up (1/25)
+2026-04-06 11:54:45,417 | INFO    | [DEBUG] Tick received: NIFTY @ 22000
+2026-04-06 11:54:45,417 | INFO    | [FEATURE] NIFTY warming up... (1/30)
+2026-04-06 11:54:45,418 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,418 | INFO    | [DEBUG] Tick received: NIFTY @ 22001
+2026-04-06 11:54:45,418 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,418 | INFO    | [DEBUG] Tick received: NIFTY @ 22002
+2026-04-06 11:54:45,418 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,418 | INFO    | [DEBUG] Tick received: NIFTY @ 22000
+2026-04-06 11:54:45,418 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,418 | INFO    | [DEBUG] Tick received: NIFTY @ 22001
+2026-04-06 11:54:45,418 | INFO    | [FEATURE] NIFTY warming up... (5/30)
+2026-04-06 11:54:45,418 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,418 | INFO    | [DEBUG] Tick received: NIFTY @ 22002
+2026-04-06 11:54:45,418 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,418 | INFO    | [DEBUG] Tick received: NIFTY @ 22000
+2026-04-06 11:54:45,418 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,418 | INFO    | [DEBUG] Tick received: NIFTY @ 22001
+2026-04-06 11:54:45,418 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,418 | INFO    | [DEBUG] Tick received: NIFTY @ 22002
+2026-04-06 11:54:45,418 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,418 | INFO    | [DEBUG] Tick received: NIFTY @ 22000
+2026-04-06 11:54:45,419 | INFO    | [FEATURE] NIFTY warming up... (10/30)
+2026-04-06 11:54:45,419 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,419 | INFO    | [DEBUG] Tick received: NIFTY @ 22001
+2026-04-06 11:54:45,419 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,419 | INFO    | [DEBUG] Tick received: NIFTY @ 22002
+2026-04-06 11:54:45,419 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,419 | INFO    | [DEBUG] Tick received: NIFTY @ 22000
+2026-04-06 11:54:45,419 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,419 | INFO    | [DEBUG] Tick received: NIFTY @ 22001
+2026-04-06 11:54:45,419 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,419 | INFO    | [DEBUG] Tick received: NIFTY @ 22002
+2026-04-06 11:54:45,419 | INFO    | [FEATURE] NIFTY warming up... (15/30)
+2026-04-06 11:54:45,419 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,419 | INFO    | [DEBUG] Tick received: NIFTY @ 22000
+2026-04-06 11:54:45,419 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,419 | INFO    | [DEBUG] Tick received: NIFTY @ 22001
+2026-04-06 11:54:45,419 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,419 | INFO    | [DEBUG] Tick received: NIFTY @ 22002
+2026-04-06 11:54:45,419 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,419 | INFO    | [DEBUG] Tick received: NIFTY @ 22000
+2026-04-06 11:54:45,420 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,420 | INFO    | [DEBUG] Tick received: NIFTY @ 22001
+2026-04-06 11:54:45,420 | INFO    | [FEATURE] NIFTY warming up... (20/30)
+2026-04-06 11:54:45,420 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,420 | INFO    | [DEBUG] Tick received: NIFTY @ 22002
+2026-04-06 11:54:45,420 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,420 | INFO    | [DEBUG] Tick received: NIFTY @ 22000
+2026-04-06 11:54:45,420 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,420 | INFO    | [DEBUG] Tick received: NIFTY @ 22001
+2026-04-06 11:54:45,420 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,420 | INFO    | [DEBUG] Tick received: NIFTY @ 22002
+2026-04-06 11:54:45,420 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,420 | INFO    | [DEBUG] Tick received: NIFTY @ 22000
+2026-04-06 11:54:45,420 | INFO    | [FEATURE] NIFTY warming up... (25/30)
+2026-04-06 11:54:45,420 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,420 | INFO    | [DEBUG] Tick received: NIFTY @ 22001
+2026-04-06 11:54:45,420 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,420 | INFO    | [DEBUG] Tick received: NIFTY @ 22002
+2026-04-06 11:54:45,420 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,420 | INFO    | [DEBUG] Tick received: NIFTY @ 22000
+2026-04-06 11:54:45,421 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,421 | INFO    | [DEBUG] Tick received: NIFTY @ 22001
+2026-04-06 11:54:45,421 | INFO    | [BLOCKED] NIFTY feature engine not ready
+2026-04-06 11:54:45,421 | INFO    | [DEBUG] Tick received: NIFTY @ 22002
+2026-04-06 11:54:45,421 | INFO    | [FEATURE] ✅ NIFTY feature engine ready — regime detection active
+2026-04-06 11:54:45,422 | INFO    | [DEBUG] NIFTY features ready — calling strategy
+2026-04-06 11:54:45,423 | INFO    | [ORDER] NIFTY SELL executed
+2026-04-06 11:54:45,424 | INFO    | [EXEC] ENTRY NIFTY | Strike 22000 | Premium 220.02 → Fill 218.92 | Lots 1×75 | LIVE_SIGNAL
+2026-04-06 11:54:45,424 | INFO    | [DEBUG] Tick received: NIFTY @ 22000
+2026-04-06 11:54:45,424 | INFO    | [DEBUG] NIFTY features ready — calling strategy
+2026-04-06 11:54:45,425 | INFO    | [BLOCKED] NIFTY already has active position; duplicate ENTRY ignored
+2026-04-06 11:54:45,425 | INFO    | [DEBUG] Tick received: NIFTY @ 22001
+2026-04-06 11:54:45,425 | INFO    | [DEBUG] NIFTY features ready — calling strategy
+2026-04-06 11:54:45,426 | INFO    | [BLOCKED] NIFTY already has active position; duplicate ENTRY ignored
+2026-04-06 11:54:45,426 | INFO    | [DEBUG] Tick received: NIFTY @ 22002
+2026-04-06 11:54:45,426 | INFO    | [DEBUG] NIFTY features ready — calling strategy
+2026-04-06 11:54:45,427 | INFO    | [BLOCKED] NIFTY already has active position; duplicate ENTRY ignored
+2026-04-06 11:54:45,427 | INFO    | [DEBUG] Tick received: NIFTY @ 22000
+2026-04-06 11:54:45,427 | INFO    | [DEBUG] NIFTY features ready — calling strategy
+2026-04-06 11:54:45,428 | INFO    | [BLOCKED] NIFTY already has active position; duplicate ENTRY ignored
+2026-04-06 11:54:45,428 | INFO    | [DEBUG] Tick received: NIFTY @ 22001
+2026-04-06 11:54:45,428 | INFO    | [DEBUG] NIFTY features ready — calling strategy
+2026-04-06 11:54:45,429 | INFO    | [BLOCKED] NIFTY already has active position; duplicate ENTRY ignored
+2026-04-06 11:54:45,429 | INFO    | [DEBUG] Tick received: NIFTY @ 22001
+2026-04-06 11:54:45,429 | INFO    | [DEBUG] NIFTY features ready — calling strategy
+2026-04-06 11:54:45,429 | INFO    | [BLOCKED] NIFTY already has active position; duplicate ENTRY ignored
+2026-04-06 11:54:45,430 | INFO    | [DEBUG] Tick received: NIFTY @ 22002
+2026-04-06 11:54:45,430 | INFO    | [DEBUG] NIFTY features ready — calling strategy
+2026-04-06 11:54:45,430 | INFO    | [BLOCKED] NIFTY already has active position; duplicate ENTRY ignored
+2026-04-06 11:54:45,431 | INFO    | [DEBUG] Tick received: NIFTY @ 22001
+2026-04-06 11:54:45,431 | INFO    | [DEBUG] NIFTY features ready — calling strategy
+2026-04-06 11:54:45,432 | INFO    | [BLOCKED] NIFTY already has active position; duplicate ENTRY ignored
+2026-04-06 11:54:45,432 | INFO    | [DEBUG] Tick received: NIFTY @ 22002
+2026-04-06 11:54:45,432 | INFO    | [DEBUG] NIFTY features ready — calling strategy
+2026-04-06 11:54:45,433 | INFO    | [BLOCKED] NIFTY already has active position; duplicate ENTRY ignored
+2026-04-06 11:54:45,433 | INFO    | [DEBUG] Tick received: NIFTY @ 22001
+2026-04-06 11:54:45,433 | INFO    | [DEBUG] NIFTY features ready — calling strategy
+2026-04-06 11:54:45,433 | INFO    | [BLOCKED] NIFTY already has active position; duplicate ENTRY ignored

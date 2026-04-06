@@ -95,15 +95,24 @@ class StrategyWrapper:
     def on_tick(self, symbol: str, price: float, features: Dict, timestamp: datetime):
         """Delegate live tick handling to strategy module implementation when available."""
         if self._live_strategy is not None and hasattr(self._live_strategy, "on_tick"):
-            self._live_strategy.on_tick(symbol=symbol, price=price, features=features, timestamp=timestamp)
-            return
+            return self._live_strategy.on_tick(
+                symbol=symbol,
+                price=price,
+                features=features,
+                timestamp=timestamp,
+            )
 
         mod_on_tick = getattr(self._mod, "on_tick", None)
         if callable(mod_on_tick):
-            mod_on_tick(symbol=symbol, price=price, features=features, timestamp=timestamp)
-            return
+            return mod_on_tick(
+                symbol=symbol,
+                price=price,
+                features=features,
+                timestamp=timestamp,
+            )
 
         logger.error("[FATAL] Strategy has no on_tick method")
+        return None
 
     @staticmethod
     def _load_module(path: str):
@@ -298,6 +307,7 @@ class PaperTrader:
         self._last_signal_check = datetime.min
         self._signal_cooldown_seconds = max(tick_interval * 2, 10)
         self._expiry_date = self._next_weekly_expiry()
+        self._live_signal_positions: Dict[str, Dict] = {}
 
     @staticmethod
     def _next_weekly_expiry() -> datetime:
@@ -371,12 +381,48 @@ class PaperTrader:
 
             # CRITICAL FIX: call strategy with symbol and symbol-specific features
             if hasattr(self.strategy, "on_tick"):
-                self.strategy.on_tick(
+                signal = self.strategy.on_tick(
                     symbol=symbol,
                     price=price,
                     features=features,
                     timestamp=timestamp,
                 )
+                print(f"SIGNAL RECEIVED: {symbol} -> {signal}")
+
+                # Stateful signal execution bridge: one ENTRY per symbol until EXIT.
+                symbol_active = any(p.symbol == symbol for p in self.positions.positions)
+
+                if signal == "ENTRY" and not symbol_active and symbol not in self._live_signal_positions:
+                    self.logger.info(f"[ORDER] {symbol} SELL executed")
+                    self._live_signal_positions[symbol] = {
+                        "side": "SELL",
+                        "entry_price": price,
+                        "timestamp": timestamp,
+                    }
+
+                    lot_qty = 75 if symbol == "NIFTY" else 30
+                    strike = round(price / 50) * 50
+                    premium = max(price * 0.01, 10.0)
+                    self.positions.open_position(
+                        symbol=symbol,
+                        strike=strike,
+                        premium=premium,
+                        lots=1,
+                        lot_qty=lot_qty,
+                        expiry_date=self._expiry_date,
+                        regime="LIVE_SIGNAL",
+                        quality_score=1.0,
+                        position_scale=1.0,
+                    )
+                elif signal == "ENTRY" and (symbol_active or symbol in self._live_signal_positions):
+                    self.logger.info(f"[BLOCKED] {symbol} already has active position; duplicate ENTRY ignored")
+
+                if signal == "EXIT" and (symbol_active or symbol in self._live_signal_positions):
+                    self.logger.info(f"[EXIT] Closing {symbol} position from live signal")
+                    self._live_signal_positions.pop(symbol, None)
+                    to_close = [p for p in list(self.positions.positions) if p.symbol == symbol]
+                    for pos in to_close:
+                        self.positions._close_position(pos, f"Live strategy EXIT for {symbol}", pos.current_price)
             else:
                 self.logger.error("[FATAL] Strategy has no on_tick method")
 

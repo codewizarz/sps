@@ -76,11 +76,9 @@ class LiveStrategy:
 
         # Extract features
         rv20 = features.get("rv20")
-        returns = features.get("returns")
-
         if rv20 is None:
             logger.info("[BLOCKED] rv20 missing")
-            return
+            return None
 
         # Determine regime (simple fallback)
         if rv20 < 0.01:
@@ -95,11 +93,10 @@ class LiveStrategy:
         # Basic entry condition (temporary debug)
         if regime in ["LOW", "NORMAL"]:
             logger.info("[SIGNAL] Entry condition satisfied")
-
-            # DO NOT place trade yet — just confirm signal works
-            return
+            return "ENTRY"
         else:
             logger.info("[BLOCKED] Regime too high")
+            return "EXIT"
 
 
 # =============================================================================
