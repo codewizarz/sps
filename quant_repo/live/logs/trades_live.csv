@@ -1,2 +1,0 @@
-timestamp,trade_id,symbol,action,strike,premium,lots,lot_qty,slippage_adjusted_price,side,regime,exit_reason,gross_pnl,net_pnl,position_scale,quality_score
-2026-04-06T11:54:45.424051,PT-0001-45d5b7,NIFTY,ENTRY,22000,220.02,1,75,218.9199,SELL,LIVE_SIGNAL,,0.0,0.0,1.0,1.0

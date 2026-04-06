@@ -320,6 +320,16 @@ class PaperTrader:
             hour=15, minute=30, second=0, microsecond=0
         )
 
+    def _has_position(self, symbol: str) -> bool:
+        """Check if there is an active position for a given symbol."""
+        return any(pos.symbol == symbol for pos in self.positions.positions)
+
+    def _close_symbol_positions(self, symbol: str, reason: str):
+        """Close all active positions for a specific symbol."""
+        to_close = [p for p in list(self.positions.positions) if p.symbol == symbol]
+        for pos in to_close:
+            self.positions._close_position(pos, reason, pos.current_price)
+
     # ── Tick handler ────────────────────────────────────────────────────
 
     def _on_tick(self, price_or_tick, timestamp: Optional[datetime] = None):
@@ -381,19 +391,30 @@ class PaperTrader:
 
             # CRITICAL FIX: call strategy with symbol and symbol-specific features
             if hasattr(self.strategy, "on_tick"):
-                signal = self.strategy.on_tick(
+                raw_signal = self.strategy.on_tick(
                     symbol=symbol,
                     price=price,
                     features=features,
                     timestamp=timestamp,
                 )
-                print(f"SIGNAL RECEIVED: {symbol} -> {signal}")
+
+                # Normalize heterogeneous strategy outputs to a single signal string.
+                signal = raw_signal
+                if isinstance(raw_signal, dict):
+                    signal = raw_signal.get("signal")
+                elif isinstance(raw_signal, tuple):
+                    signal = raw_signal[0] if raw_signal else None
+
+                if signal:
+                    print(f"[SIGNAL RECEIVED] {symbol} -> {signal}")
+                else:
+                    return
 
                 # Stateful signal execution bridge: one ENTRY per symbol until EXIT.
-                symbol_active = any(p.symbol == symbol for p in self.positions.positions)
+                symbol_active = self._has_position(symbol)
 
                 if signal == "ENTRY" and not symbol_active and symbol not in self._live_signal_positions:
-                    self.logger.info(f"[ORDER] {symbol} SELL executed")
+                    self.logger.info(f"[ORDER] {symbol} ENTRY executed")
                     self._live_signal_positions[symbol] = {
                         "side": "SELL",
                         "entry_price": price,
@@ -420,9 +441,7 @@ class PaperTrader:
                 if signal == "EXIT" and (symbol_active or symbol in self._live_signal_positions):
                     self.logger.info(f"[EXIT] Closing {symbol} position from live signal")
                     self._live_signal_positions.pop(symbol, None)
-                    to_close = [p for p in list(self.positions.positions) if p.symbol == symbol]
-                    for pos in to_close:
-                        self.positions._close_position(pos, f"Live strategy EXIT for {symbol}", pos.current_price)
+                    self._close_symbol_positions(symbol, f"Live strategy EXIT for {symbol}")
             else:
                 self.logger.error("[FATAL] Strategy has no on_tick method")
 
