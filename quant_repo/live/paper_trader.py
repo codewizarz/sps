@@ -92,15 +92,15 @@ class StrategyWrapper:
         self._price_buffers: Dict[str, List[float]] = {}
         self._vol_cache: Dict[str, Dict] = {}
 
-    def on_tick(self, price: float, features: Dict, timestamp: datetime):
+    def on_tick(self, symbol: str, price: float, features: Dict, timestamp: datetime):
         """Delegate live tick handling to strategy module implementation when available."""
         if self._live_strategy is not None and hasattr(self._live_strategy, "on_tick"):
-            self._live_strategy.on_tick(price=price, features=features, timestamp=timestamp)
+            self._live_strategy.on_tick(symbol=symbol, price=price, features=features, timestamp=timestamp)
             return
 
         mod_on_tick = getattr(self._mod, "on_tick", None)
         if callable(mod_on_tick):
-            mod_on_tick(price=price, features=features, timestamp=timestamp)
+            mod_on_tick(symbol=symbol, price=price, features=features, timestamp=timestamp)
             return
 
         logger.error("[FATAL] Strategy has no on_tick method")
@@ -282,9 +282,14 @@ class PaperTrader:
             symbols=list(self.strategy.config.symbols),
         )
 
-        # Feature engine (diagnostic companion — independent RV20 logging)
-        self.feature_engine = FeatureEngine(maxlen=500)
-        self._feature_ready_logged = False
+        # Separate feature engines per symbol (prevents price series contamination)
+        self.feature_engines: Dict[str, FeatureEngine] = {
+            symbol: FeatureEngine(maxlen=500)
+            for symbol in self.strategy.config.symbols
+        }
+        self._feature_ready_logged: Dict[str, bool] = {
+            symbol: False for symbol in self.strategy.config.symbols
+        }
 
         # Telegram (may be injected later by LiveOperator)
         self.telegram = None
@@ -316,46 +321,58 @@ class PaperTrader:
                     return  # Option ticks update snapshot but don't trigger signals
                 price = tick_obj.ltp
                 timestamp = tick_obj.timestamp
+                symbol = tick_obj.symbol
 
                 # Keep existing strategy price buffer updates for entry checks.
-                self.strategy.update_price(tick_obj.symbol, tick_obj.ltp)
+                self.strategy.update_price(symbol, price)
             else:
                 price = float(price_or_tick)
                 timestamp = timestamp or datetime.now()
+                symbol = None  # Cannot identify symbol without Tick object
 
-            self.logger.info(f"[DEBUG] Tick received: {price}")
-
-            # Update feature engine
-            self.feature_engine.update(price, timestamp)
-
-            if not self.feature_engine.is_ready():
-                # Preserve existing warmup logs while adding explicit block reason.
-                buf_len = len(self.feature_engine.prices)
-                if buf_len % 5 == 0 or buf_len == 1:
-                    self.logger.info(f"[FEATURE] Warming up... ({buf_len}/30)")
-                self.logger.info("[BLOCKED] Feature engine not ready")
+            if not symbol:
+                self.logger.error("[ERROR] Tick has no symbol identifier")
                 return
 
-            # One-time ready announcement
-            if not self._feature_ready_logged:
-                self._feature_ready_logged = True
-                self.logger.info("[FEATURE] ✅ Feature engine ready — regime detection active")
+            self.logger.info(f"[DEBUG] Tick received: {symbol} @ {price}")
+
+            # Route tick to symbol-specific feature engine
+            if symbol not in self.feature_engines:
+                self.logger.error(f"[ERROR] Unknown symbol: {symbol}")
+                return
+
+            feature_engine = self.feature_engines[symbol]
+            feature_engine.update(price, timestamp)
+
+            # Check if ready for this symbol
+            if not feature_engine.is_ready():
+                buf_len = len(feature_engine.prices)
+                if buf_len % 5 == 0 or buf_len == 1:
+                    self.logger.info(f"[FEATURE] {symbol} warming up... ({buf_len}/30)")
+                self.logger.info(f"[BLOCKED] {symbol} feature engine not ready")
+                return
+
+            # One-time ready announcement per symbol
+            if not self._feature_ready_logged[symbol]:
+                self._feature_ready_logged[symbol] = True
+                self.logger.info(f"[FEATURE] ✅ {symbol} feature engine ready — regime detection active")
                 if self.telegram and hasattr(self.telegram, "send"):
                     try:
-                        self.telegram.send("✅ Feature engine ready — regime detection active")
+                        self.telegram.send(f"✅ {symbol} feature engine ready — regime detection active")
                     except Exception:
                         pass
 
-            features = self.feature_engine.compute_features()
+            features = feature_engine.compute_features()
             if not features:
-                self.logger.info("[BLOCKED] Features missing")
+                self.logger.info(f"[BLOCKED] {symbol} features missing")
                 return
 
-            self.logger.info("[DEBUG] Features ready — calling strategy")
+            self.logger.info(f"[DEBUG] {symbol} features ready — calling strategy")
 
-            # CRITICAL FIX: call strategy
+            # CRITICAL FIX: call strategy with symbol and symbol-specific features
             if hasattr(self.strategy, "on_tick"):
                 self.strategy.on_tick(
+                    symbol=symbol,
                     price=price,
                     features=features,
                     timestamp=timestamp,
@@ -481,17 +498,17 @@ class PaperTrader:
 
         active_symbols = [p.symbol for p in self.positions.positions]
 
-        # Log feature engine status
-        features = self.feature_engine.compute_features()
-        if features:
-            self.logger.info(
-                f"[FEATURE] Buffer={len(self.feature_engine.prices)} "
-                f"RV20={features['rv20']:.4f}"
-            )
-
         for symbol in self.strategy.config.symbols:
             if symbol in active_symbols:
                 continue
+
+            # Log feature engine status for this symbol
+            features = self.feature_engines[symbol].compute_features()
+            if features:
+                self.logger.info(
+                    f"[FEATURE] {symbol} Buffer={len(self.feature_engines[symbol].prices)} "
+                    f"RV20={features['rv20']:.4f}"
+                )
 
             spot = (
                 snap.nifty_spot if symbol == "NIFTY"
