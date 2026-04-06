@@ -92,7 +92,7 @@ class StrategyWrapper:
         self._price_buffers: Dict[str, List[float]] = {}
         self._vol_cache: Dict[str, Dict] = {}
 
-    def on_tick(self, symbol: str, price: float, features: Dict, timestamp: datetime):
+    def on_tick(self, symbol: str, price: float, features: Dict, timestamp: datetime, **kwargs):
         """Delegate live tick handling to strategy module implementation when available."""
         if self._live_strategy is not None and hasattr(self._live_strategy, "on_tick"):
             return self._live_strategy.on_tick(
@@ -100,6 +100,7 @@ class StrategyWrapper:
                 price=price,
                 features=features,
                 timestamp=timestamp,
+                **kwargs,
             )
 
         mod_on_tick = getattr(self._mod, "on_tick", None)
@@ -109,6 +110,7 @@ class StrategyWrapper:
                 price=price,
                 features=features,
                 timestamp=timestamp,
+                **kwargs,
             )
 
         logger.error("[FATAL] Strategy has no on_tick method")
