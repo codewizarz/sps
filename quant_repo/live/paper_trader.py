@@ -328,7 +328,7 @@ class PaperTrader:
         """Close all active positions for a specific symbol."""
         to_close = [p for p in list(self.positions.positions) if p.symbol == symbol]
         for pos in to_close:
-            self.positions._close_position(pos, reason, pos.current_price)
+            self.positions.close_position(pos, reason, pos.current_price)
 
     # ── Tick handler ────────────────────────────────────────────────────
 
@@ -389,6 +389,15 @@ class PaperTrader:
 
             self.logger.info(f"[DEBUG] {symbol} features ready — calling strategy")
 
+            symbol_active = self._has_position(symbol)
+            position_ctx = self._live_signal_positions.get(symbol)
+            position_age_seconds = None
+            if isinstance(position_ctx, dict) and position_ctx.get("timestamp"):
+                position_age_seconds = max(
+                    0.0,
+                    (timestamp - position_ctx["timestamp"]).total_seconds(),
+                )
+
             # CRITICAL FIX: call strategy with symbol and symbol-specific features
             if hasattr(self.strategy, "on_tick"):
                 raw_signal = self.strategy.on_tick(
@@ -396,6 +405,8 @@ class PaperTrader:
                     price=price,
                     features=features,
                     timestamp=timestamp,
+                    has_position=symbol_active,
+                    position_age_seconds=position_age_seconds,
                 )
 
                 # Normalize heterogeneous strategy outputs to a single signal string.
@@ -411,8 +422,6 @@ class PaperTrader:
                     return
 
                 # Stateful signal execution bridge: one ENTRY per symbol until EXIT.
-                symbol_active = self._has_position(symbol)
-
                 if signal == "ENTRY" and not symbol_active and symbol not in self._live_signal_positions:
                     self.logger.info(f"[ORDER] {symbol} ENTRY executed")
                     self._live_signal_positions[symbol] = {

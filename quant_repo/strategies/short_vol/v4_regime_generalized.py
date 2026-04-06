@@ -66,6 +66,11 @@ logger = logging.getLogger(__name__)
 class LiveStrategy:
     """Minimal live tick strategy hook for paper-trader wiring verification."""
 
+    def __init__(self):
+        # Keep exits deterministic in live-paper mode to avoid stale forever-held positions.
+        self.max_hold_seconds = 45
+        self.exit_rv_threshold = 0.0018
+
     def on_tick(self, symbol=None, price=None, features=None, timestamp=None, **kwargs):
         logger.info("[DEBUG] Strategy on_tick called")
         logger.info(f"[DEBUG] {symbol} | Features: {features}")
@@ -89,6 +94,15 @@ class LiveStrategy:
             regime = "HIGH"
 
         logger.info(f"[REGIME] {symbol} | RV20={rv20:.4f} | Regime={regime}")
+
+        has_position = bool(kwargs.get("has_position", False))
+        position_age_seconds = kwargs.get("position_age_seconds")
+        max_hold_hit = position_age_seconds is not None and position_age_seconds >= self.max_hold_seconds
+
+        if has_position and (regime == "HIGH" or rv20 >= self.exit_rv_threshold or max_hold_hit):
+            reason = "regime/high_rv" if (regime == "HIGH" or rv20 >= self.exit_rv_threshold) else "max_hold"
+            logger.info(f"[SIGNAL] Exit condition satisfied ({reason})")
+            return "EXIT"
 
         # Basic entry condition (temporary debug)
         if regime in ["LOW", "NORMAL"]:

@@ -299,6 +299,17 @@ class PositionManager:
         self.peak_equity = max(self.peak_equity, self.equity)
         self.positions.remove(pos)
 
+    def close_position(self, pos: PaperPosition, reason: str, price: Optional[float] = None) -> bool:
+        """Public close API for external signal handlers.
+
+        Returns True when a position was closed, False when it was already absent.
+        """
+        with self._lock:
+            if pos not in self.positions:
+                return False
+            self._close_position(pos, reason, pos.current_price if price is None else price)
+            return True
+
     # ── Force close all ─────────────────────────────────────────────────
 
     def close_all(self, reason: str = "Manual close"):
