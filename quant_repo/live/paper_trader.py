@@ -399,6 +399,11 @@ class PaperTrader:
                     0.0,
                     (timestamp - position_ctx["timestamp"]).total_seconds(),
                 )
+            elif symbol_active:
+                symbol_positions = [p for p in self.positions.positions if p.symbol == symbol]
+                if symbol_positions:
+                    oldest_entry = min(p.entry_date for p in symbol_positions)
+                    position_age_seconds = max(0.0, (timestamp - oldest_entry).total_seconds())
 
             # CRITICAL FIX: call strategy with symbol and symbol-specific features
             if hasattr(self.strategy, "on_tick"):
