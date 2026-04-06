@@ -63,6 +63,40 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 logger = logging.getLogger(__name__)
 
 
+class LiveStrategy:
+    """Minimal live tick strategy hook for paper-trader wiring verification."""
+
+    def on_tick(self, price, features, timestamp):
+        logger.info("[DEBUG] Strategy on_tick called")
+
+        # Extract features
+        rv20 = features.get("rv20")
+        returns = features.get("returns")
+
+        if rv20 is None:
+            logger.info("[BLOCKED] rv20 missing")
+            return
+
+        # Determine regime (simple fallback)
+        if rv20 < 0.01:
+            regime = "LOW"
+        elif rv20 < 0.02:
+            regime = "NORMAL"
+        else:
+            regime = "HIGH"
+
+        logger.info(f"[REGIME] RV20={rv20:.4f} | Regime={regime}")
+
+        # Basic entry condition (temporary debug)
+        if regime in ["LOW", "NORMAL"]:
+            logger.info("[SIGNAL] Entry condition satisfied")
+
+            # DO NOT place trade yet — just confirm signal works
+            return
+        else:
+            logger.info("[BLOCKED] Regime too high")
+
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================

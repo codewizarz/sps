@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import logging
 import os
 import signal
 import sys
@@ -44,6 +45,9 @@ from quant_repo.live.market_hours import is_market_open
 from quant_repo.live.position_manager import (
     PaperPosition, PositionManager, RiskLimits,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # ── V4 Strategy Wrapper ────────────────────────────────────────────────
@@ -74,10 +78,32 @@ class StrategyWrapper:
         self.VolatilityRegime = self._mod.VolatilityRegime
 
         self.config = self.StrategyConfig()
+        self._live_strategy = None
+
+        # Optional live strategy implementation for direct tick callbacks.
+        live_strategy_cls = getattr(self._mod, "LiveStrategy", None)
+        if live_strategy_cls is not None:
+            try:
+                self._live_strategy = live_strategy_cls()
+            except Exception as exc:
+                logger.error(f"[FATAL] Failed to initialize LiveStrategy: {exc}")
 
         # Rolling price buffer for vol computation
         self._price_buffers: Dict[str, List[float]] = {}
         self._vol_cache: Dict[str, Dict] = {}
+
+    def on_tick(self, price: float, features: Dict, timestamp: datetime):
+        """Delegate live tick handling to strategy module implementation when available."""
+        if self._live_strategy is not None and hasattr(self._live_strategy, "on_tick"):
+            self._live_strategy.on_tick(price=price, features=features, timestamp=timestamp)
+            return
+
+        mod_on_tick = getattr(self._mod, "on_tick", None)
+        if callable(mod_on_tick):
+            mod_on_tick(price=price, features=features, timestamp=timestamp)
+            return
+
+        logger.error("[FATAL] Strategy has no on_tick method")
 
     @staticmethod
     def _load_module(path: str):
@@ -238,6 +264,8 @@ class PaperTrader:
         # Components
         self.logger = PaperLogger()
         self.strategy = StrategyWrapper(strategy_path)
+        if self.strategy is None:
+            raise RuntimeError("[FATAL] Strategy initialization failed: self.strategy is None")
         self.engine = ExecutionEngine(self.logger)
         self.positions = PositionManager(
             execution_engine=self.engine,
@@ -279,33 +307,64 @@ class PaperTrader:
 
     # ── Tick handler ────────────────────────────────────────────────────
 
-    def _on_tick(self, tick: Tick):
+    def _on_tick(self, price_or_tick, timestamp: Optional[datetime] = None):
         """Called on every incoming tick from the feed."""
-        if tick.is_option:
-            return  # Option ticks update snapshot but don't trigger signals
+        try:
+            tick_obj = price_or_tick if isinstance(price_or_tick, Tick) else None
+            if tick_obj is not None:
+                if tick_obj.is_option:
+                    return  # Option ticks update snapshot but don't trigger signals
+                price = tick_obj.ltp
+                timestamp = tick_obj.timestamp
 
-        # Update strategy price buffer
-        self.strategy.update_price(tick.symbol, tick.ltp)
+                # Keep existing strategy price buffer updates for entry checks.
+                self.strategy.update_price(tick_obj.symbol, tick_obj.ltp)
+            else:
+                price = float(price_or_tick)
+                timestamp = timestamp or datetime.now()
 
-        # Update diagnostic feature engine
-        self.feature_engine.update(tick.ltp, tick.timestamp)
+            self.logger.info(f"[DEBUG] Tick received: {price}")
 
-        if not self.feature_engine.is_ready():
-            # Log warmup progress every 5 ticks to avoid spam
-            buf_len = len(self.feature_engine.prices)
-            if buf_len % 5 == 0 or buf_len == 1:
-                self.logger.info(f"[FEATURE] Warming up... ({buf_len}/30)")
-            return
+            # Update feature engine
+            self.feature_engine.update(price, timestamp)
 
-        # One-time Telegram alert when feature engine becomes ready
-        if not self._feature_ready_logged:
-            self._feature_ready_logged = True
-            self.logger.info("[FEATURE] ✅ Feature engine ready — regime detection active")
-            if self.telegram and hasattr(self.telegram, 'send'):
-                try:
-                    self.telegram.send("✅ Feature engine ready — regime detection active")
-                except Exception:
-                    pass
+            if not self.feature_engine.is_ready():
+                # Preserve existing warmup logs while adding explicit block reason.
+                buf_len = len(self.feature_engine.prices)
+                if buf_len % 5 == 0 or buf_len == 1:
+                    self.logger.info(f"[FEATURE] Warming up... ({buf_len}/30)")
+                self.logger.info("[BLOCKED] Feature engine not ready")
+                return
+
+            # One-time ready announcement
+            if not self._feature_ready_logged:
+                self._feature_ready_logged = True
+                self.logger.info("[FEATURE] ✅ Feature engine ready — regime detection active")
+                if self.telegram and hasattr(self.telegram, "send"):
+                    try:
+                        self.telegram.send("✅ Feature engine ready — regime detection active")
+                    except Exception:
+                        pass
+
+            features = self.feature_engine.compute_features()
+            if not features:
+                self.logger.info("[BLOCKED] Features missing")
+                return
+
+            self.logger.info("[DEBUG] Features ready — calling strategy")
+
+            # CRITICAL FIX: call strategy
+            if hasattr(self.strategy, "on_tick"):
+                self.strategy.on_tick(
+                    price=price,
+                    features=features,
+                    timestamp=timestamp,
+                )
+            else:
+                self.logger.error("[FATAL] Strategy has no on_tick method")
+
+        except Exception as e:
+            self.logger.error(f"[FATAL] Tick processing error: {e}")
 
     # ── Main loop ───────────────────────────────────────────────────────
 
