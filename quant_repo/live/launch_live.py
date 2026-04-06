@@ -435,26 +435,13 @@ class LiveOperator:
             self.telegram.send("🔴 Market CLOSED — trading disabled")
 
     def _handle_square_off(self, trader):
-        """Auto square-off at 15:20 IST."""
+        """Carry-forward mode: EOD square-off disabled."""
         if self._square_off_done_today:
             return
         if not is_square_off_time():
             return
-
         self._square_off_done_today = True
-        positions = trader.positions.positions
-        if not positions:
-            _log("SQUARE_OFF", "No open positions — nothing to close")
-            return
-
-        count = len(positions)
-        _log("SQUARE_OFF", f"📉 EOD auto square-off — closing {count} position(s)")
-        trader.positions.close_all("EOD_SQUARE_OFF")
-        _log("SQUARE_OFF", f"✅ Closed {count} position(s)")
-        self.telegram.send(
-            f"📉 EOD Square-Off: Closed {count} position(s)\n"
-            f"Closed PnL: ₹{trader.positions.closed_pnl:+,.0f}"
-        )
+        _log("SQUARE_OFF", "Carry-forward mode: EOD auto square-off disabled")
 
     def _cleanup_invalid_positions(self, trader):
         """Close any positions opened outside market hours on startup."""

@@ -67,11 +67,10 @@ class LiveStrategy:
     """Minimal live tick strategy hook for paper-trader wiring verification."""
 
     def __init__(self):
-        # Keep exits deterministic in live-paper mode to avoid stale forever-held positions.
-        self.max_hold_seconds = 45
-        self.exit_rv_threshold = 0.0018
-        self.force_exit_when_positioned = True
-        self._position_seen_at: Dict[str, datetime] = {}
+        # Carry-forward mode: exit only on explicit lifecycle conditions.
+        self.stop_loss_pct = 0.35
+        self.target_pct = 0.65
+        self.expiry_exit_days = 1
 
     def on_tick(self, symbol=None, price=None, features=None, timestamp=None, **kwargs):
         logger.info("[DEBUG] Strategy on_tick called")
@@ -98,51 +97,43 @@ class LiveStrategy:
         logger.info(f"[REGIME] {symbol} | RV20={rv20:.4f} | Regime={regime}")
 
         has_position = bool(kwargs.get("has_position", False))
-        position_age_seconds = kwargs.get("position_age_seconds")
-        now_ts = timestamp or datetime.now()
+        position_pnl_pct = kwargs.get("position_pnl_pct")
+        days_to_expiry = kwargs.get("days_to_expiry")
 
         if has_position:
-            self._position_seen_at.setdefault(symbol, now_ts)
-            strategy_held_seconds = max(
-                0.0,
-                (now_ts - self._position_seen_at[symbol]).total_seconds(),
+            stop_loss_hit = (
+                position_pnl_pct is not None
+                and position_pnl_pct <= -self.stop_loss_pct
             )
-        else:
-            self._position_seen_at.pop(symbol, None)
-            strategy_held_seconds = 0.0
-
-        external_hold_hit = (
-            position_age_seconds is not None and position_age_seconds >= self.max_hold_seconds
-        )
-        strategy_hold_hit = strategy_held_seconds >= self.max_hold_seconds
-        max_hold_hit = external_hold_hit or strategy_hold_hit
-
-        should_exit = (
-            has_position and (
-                self.force_exit_when_positioned
-                or regime == "HIGH"
-                or rv20 >= self.exit_rv_threshold
-                or max_hold_hit
+            target_hit = (
+                position_pnl_pct is not None
+                and position_pnl_pct >= self.target_pct
             )
-        )
+            expiry_hit = (
+                days_to_expiry is not None
+                and days_to_expiry <= self.expiry_exit_days
+            )
 
-        if should_exit:
-            if self.force_exit_when_positioned:
-                reason = "positioned_cycle"
-            elif regime == "HIGH" or rv20 >= self.exit_rv_threshold:
-                reason = "regime/high_rv"
-            else:
-                reason = "max_hold"
-            logger.info(f"[SIGNAL] Exit condition satisfied ({reason})")
-            return "EXIT"
+            if stop_loss_hit or target_hit or expiry_hit:
+                if stop_loss_hit:
+                    reason = "stop_loss"
+                elif target_hit:
+                    reason = "target"
+                else:
+                    reason = "near_expiry"
+                logger.info(f"[SIGNAL] Exit condition satisfied ({reason})")
+                return "EXIT"
 
-        # Basic entry condition (temporary debug)
+            # HOLD in carry-forward mode while explicit exit criteria are not met.
+            return None
+
+        # Entry allowed only when no active symbol position exists.
         if regime in ["LOW", "NORMAL"]:
             logger.info("[SIGNAL] Entry condition satisfied")
             return "ENTRY"
-        else:
-            logger.info("[BLOCKED] Regime too high")
-            return "EXIT"
+
+        logger.info("[BLOCKED] Regime too high")
+        return None
 
 
 # =============================================================================

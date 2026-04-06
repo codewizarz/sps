@@ -332,6 +332,13 @@ class PaperTrader:
         for pos in to_close:
             self.positions.close_position(pos, reason, pos.current_price)
 
+    @staticmethod
+    def _format_days_held(entry_date: datetime, now_ts: datetime) -> str:
+        held = max(now_ts - entry_date, timedelta(0))
+        days = held.days
+        hours = held.seconds // 3600
+        return f"{days}d {hours}h"
+
     # ── Tick handler ────────────────────────────────────────────────────
 
     def _on_tick(self, price_or_tick, timestamp: Optional[datetime] = None):
@@ -394,6 +401,8 @@ class PaperTrader:
             symbol_active = self._has_position(symbol)
             position_ctx = self._live_signal_positions.get(symbol)
             position_age_seconds = None
+            position_pnl_pct = None
+            days_to_expiry = None
             if isinstance(position_ctx, dict) and position_ctx.get("timestamp"):
                 position_age_seconds = max(
                     0.0,
@@ -405,6 +414,12 @@ class PaperTrader:
                     oldest_entry = min(p.entry_date for p in symbol_positions)
                     position_age_seconds = max(0.0, (timestamp - oldest_entry).total_seconds())
 
+            symbol_positions = [p for p in self.positions.positions if p.symbol == symbol]
+            if symbol_positions:
+                oldest_pos = min(symbol_positions, key=lambda p: p.entry_date)
+                position_pnl_pct = oldest_pos.pnl_pct
+                days_to_expiry = oldest_pos.dte
+
             # CRITICAL FIX: call strategy with symbol and symbol-specific features
             if hasattr(self.strategy, "on_tick"):
                 raw_signal = self.strategy.on_tick(
@@ -414,6 +429,8 @@ class PaperTrader:
                     timestamp=timestamp,
                     has_position=symbol_active,
                     position_age_seconds=position_age_seconds,
+                    position_pnl_pct=position_pnl_pct,
+                    days_to_expiry=days_to_expiry,
                 )
 
                 # Normalize heterogeneous strategy outputs to a single signal string.
@@ -423,12 +440,27 @@ class PaperTrader:
                 elif isinstance(raw_signal, tuple):
                     signal = raw_signal[0] if raw_signal else None
 
+                # Carry-forward HOLD log while position remains active.
+                if signal in (None, "HOLD") and symbol_active:
+                    oldest_pos = min(symbol_positions, key=lambda p: p.entry_date) if symbol_positions else None
+                    if oldest_pos:
+                        held = self._format_days_held(oldest_pos.entry_date, timestamp)
+                        self.logger.info(
+                            f"[HOLD] {symbol} position continues | Held {held} | "
+                            f"PnL% {oldest_pos.pnl_pct * 100:.2f} | DTE {oldest_pos.dte}"
+                        )
+                    return
+
                 if signal:
                     print(f"[SIGNAL RECEIVED] {symbol} -> {signal}")
                 else:
                     return
 
-                # Stateful signal execution bridge: one ENTRY per symbol until EXIT.
+                # Carry-forward execution bridge: while active, only EXIT is actionable.
+                if symbol_active and signal == "ENTRY":
+                    self.logger.info(f"[BLOCKED] {symbol} already has active position; duplicate ENTRY ignored")
+                    return
+
                 if signal == "ENTRY" and not symbol_active and symbol not in self._live_signal_positions:
                     self.logger.info(f"[ORDER] {symbol} ENTRY executed")
                     self._live_signal_positions[symbol] = {
@@ -706,8 +738,10 @@ class PaperTrader:
         self.logger.info("Shutting down paper trader...")
         self.feed.stop()
         if self.positions.positions:
-            self.logger.info(f"Closing {len(self.positions.positions)} open positions...")
-            self.positions.close_all("Shutdown")
+            self.logger.info(
+                f"Carry-forward mode active: keeping {len(self.positions.positions)} open position(s) "
+                f"(no shutdown auto-close)."
+            )
         self.logger.info(
             f"Final equity: Rs {self.positions.equity:,.0f} | "
             f"Closed PnL: Rs {self.positions.closed_pnl:+,.0f} | "
