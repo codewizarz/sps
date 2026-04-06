@@ -70,6 +70,7 @@ class LiveStrategy:
         # Keep exits deterministic in live-paper mode to avoid stale forever-held positions.
         self.max_hold_seconds = 45
         self.exit_rv_threshold = 0.0018
+        self.force_exit_when_positioned = True
         self._position_seen_at: Dict[str, datetime] = {}
 
     def on_tick(self, symbol=None, price=None, features=None, timestamp=None, **kwargs):
@@ -116,8 +117,22 @@ class LiveStrategy:
         strategy_hold_hit = strategy_held_seconds >= self.max_hold_seconds
         max_hold_hit = external_hold_hit or strategy_hold_hit
 
-        if has_position and (regime == "HIGH" or rv20 >= self.exit_rv_threshold or max_hold_hit):
-            reason = "regime/high_rv" if (regime == "HIGH" or rv20 >= self.exit_rv_threshold) else "max_hold"
+        should_exit = (
+            has_position and (
+                self.force_exit_when_positioned
+                or regime == "HIGH"
+                or rv20 >= self.exit_rv_threshold
+                or max_hold_hit
+            )
+        )
+
+        if should_exit:
+            if self.force_exit_when_positioned:
+                reason = "positioned_cycle"
+            elif regime == "HIGH" or rv20 >= self.exit_rv_threshold:
+                reason = "regime/high_rv"
+            else:
+                reason = "max_hold"
             logger.info(f"[SIGNAL] Exit condition satisfied ({reason})")
             return "EXIT"
 
