@@ -66,9 +66,13 @@ logger = logging.getLogger(__name__)
 class LiveStrategy:
     """Minimal live tick strategy hook for paper-trader wiring verification."""
 
-    def on_tick(self, price, features, timestamp):
+    def on_tick(self, symbol=None, price=None, features=None, timestamp=None, **kwargs):
         logger.info("[DEBUG] Strategy on_tick called")
-        logger.info(f"[DEBUG] Features: {features}")
+        logger.info(f"[DEBUG] {symbol} | Features: {features}")
+
+        if price is None or features is None:
+            logger.info(f"[BLOCKED] {symbol} missing price/features")
+            return
 
         # Extract features
         rv20 = features.get("rv20")
@@ -86,7 +90,7 @@ class LiveStrategy:
         else:
             regime = "HIGH"
 
-        logger.info(f"[REGIME] RV20={rv20:.4f} | Regime={regime}")
+        logger.info(f"[REGIME] {symbol} | RV20={rv20:.4f} | Regime={regime}")
 
         # Basic entry condition (temporary debug)
         if regime in ["LOW", "NORMAL"]:
