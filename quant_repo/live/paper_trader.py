@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import logging
 import os
 import signal
@@ -310,6 +311,12 @@ class PaperTrader:
         self._signal_cooldown_seconds = max(tick_interval * 2, 10)
         self._expiry_date = self._next_weekly_expiry()
         self._live_signal_positions: Dict[str, Dict] = {}
+        self.state_path = ROOT / "quant_repo" / "live" / "state.json"
+
+        self.load_state()
+        self._live_signal_positions = {
+            p.symbol: True for p in self.positions.positions
+        }
 
     @staticmethod
     def _next_weekly_expiry() -> datetime:
@@ -322,15 +329,43 @@ class PaperTrader:
             hour=15, minute=30, second=0, microsecond=0
         )
 
-    def _has_position(self, symbol: str) -> bool:
+    def has_active_position(self, symbol: str) -> bool:
         """Check if there is an active position for a given symbol."""
         return any(pos.symbol == symbol for pos in self.positions.positions)
+
+    def _sync_live_signal_positions(self):
+        self._live_signal_positions = {
+            p.symbol: True for p in self.positions.positions
+        }
+
+    def save_state(self):
+        state = {
+            "equity": self.positions.equity,
+            "closed_pnl": self.positions.closed_pnl,
+        }
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.state_path.open("w", encoding="utf-8") as state_file:
+            json.dump(state, state_file)
+
+    def load_state(self):
+        try:
+            with self.state_path.open("r", encoding="utf-8") as state_file:
+                state = json.load(state_file)
+            self.positions.closed_pnl = float(state.get("closed_pnl", self.positions.closed_pnl))
+            self.positions.peak_equity = max(self.positions.peak_equity, float(state.get("equity", self.positions.equity)))
+        except FileNotFoundError:
+            print("[STATE] No previous state found")
+        except Exception as exc:
+            print(f"[STATE] Failed to load state: {exc}")
 
     def _close_symbol_positions(self, symbol: str, reason: str):
         """Close all active positions for a specific symbol."""
         to_close = [p for p in list(self.positions.positions) if p.symbol == symbol]
         for pos in to_close:
             self.positions.close_position(pos, reason, pos.current_price)
+        if to_close:
+            self.save_state()
+            self._sync_live_signal_positions()
 
     @staticmethod
     def _format_days_held(entry_date: datetime, now_ts: datetime) -> str:
@@ -398,27 +433,17 @@ class PaperTrader:
 
             self.logger.info(f"[DEBUG] {symbol} features ready — calling strategy")
 
-            symbol_active = self._has_position(symbol)
+            symbol_active = self.has_active_position(symbol)
             position_ctx = self._live_signal_positions.get(symbol)
             position_age_seconds = None
             position_pnl_pct = None
             days_to_expiry = None
-            if isinstance(position_ctx, dict) and position_ctx.get("timestamp"):
-                position_age_seconds = max(
-                    0.0,
-                    (timestamp - position_ctx["timestamp"]).total_seconds(),
-                )
-            elif symbol_active:
-                symbol_positions = [p for p in self.positions.positions if p.symbol == symbol]
-                if symbol_positions:
-                    oldest_entry = min(p.entry_date for p in symbol_positions)
-                    position_age_seconds = max(0.0, (timestamp - oldest_entry).total_seconds())
-
             symbol_positions = [p for p in self.positions.positions if p.symbol == symbol]
             if symbol_positions:
                 oldest_pos = min(symbol_positions, key=lambda p: p.entry_date)
                 position_pnl_pct = oldest_pos.pnl_pct
                 days_to_expiry = oldest_pos.dte
+                position_age_seconds = max(0.0, (timestamp - oldest_pos.entry_date).total_seconds())
 
             # CRITICAL FIX: call strategy with symbol and symbol-specific features
             if hasattr(self.strategy, "on_tick"):
@@ -451,28 +476,28 @@ class PaperTrader:
                         )
                     return
 
+                print(f"[STATE CHECK] {symbol} active={self.has_active_position(symbol)}")
+
                 if signal:
                     print(f"[SIGNAL RECEIVED] {symbol} -> {signal}")
                 else:
                     return
 
                 # Carry-forward execution bridge: while active, only EXIT is actionable.
-                if symbol_active and signal == "ENTRY":
-                    self.logger.info(f"[BLOCKED] {symbol} already has active position; duplicate ENTRY ignored")
-                    return
+                if signal == "ENTRY":
+                    if self.has_active_position(symbol):
+                        print(f"[BLOCKED] {symbol} already has real active position")
+                        self.logger.info(f"[BLOCKED] {symbol} already has active position; duplicate ENTRY ignored")
+                        return
 
-                if signal == "ENTRY" and not symbol_active and symbol not in self._live_signal_positions:
+                if signal == "ENTRY" and not symbol_active:
                     self.logger.info(f"[ORDER] {symbol} ENTRY executed")
-                    self._live_signal_positions[symbol] = {
-                        "side": "SELL",
-                        "entry_price": price,
-                        "timestamp": timestamp,
-                    }
+                    self._live_signal_positions[symbol] = True
 
                     lot_qty = 75 if symbol == "NIFTY" else 30
                     strike = round(price / 50) * 50
                     premium = max(price * 0.01, 10.0)
-                    self.positions.open_position(
+                    opened = self.positions.open_position(
                         symbol=symbol,
                         strike=strike,
                         premium=premium,
@@ -483,13 +508,17 @@ class PaperTrader:
                         quality_score=1.0,
                         position_scale=1.0,
                     )
-                elif signal == "ENTRY" and (symbol_active or symbol in self._live_signal_positions):
+                    if opened is not None:
+                        self._sync_live_signal_positions()
+                        self.save_state()
+                elif signal == "ENTRY" and self.has_active_position(symbol):
                     self.logger.info(f"[BLOCKED] {symbol} already has active position; duplicate ENTRY ignored")
+                    return
 
-                if signal == "EXIT" and (symbol_active or symbol in self._live_signal_positions):
+                if signal == "EXIT" and self.has_active_position(symbol):
                     self.logger.info(f"[EXIT] Closing {symbol} position from live signal")
-                    self._live_signal_positions.pop(symbol, None)
                     self._close_symbol_positions(symbol, f"Live strategy EXIT for {symbol}")
+                    self._sync_live_signal_positions()
             else:
                 self.logger.error("[FATAL] Strategy has no on_tick method")
 
@@ -585,12 +614,16 @@ class PaperTrader:
 
     def _check_exits(self, snap: MarketSnapshot):
         """Run exit checks on all positions."""
+        before_closed = self.positions.closed_pnl
         prices = {}
         for pos in self.positions.positions:
             key = f"{pos.symbol}_{int(pos.strike)}"
             prices[key] = pos.current_price
 
         self.positions.check_exits(prices)
+        if self.positions.closed_pnl != before_closed:
+            self.save_state()
+            self._sync_live_signal_positions()
 
     def _check_entries(self, snap: MarketSnapshot):
         """Generate entry signals from strategy."""
@@ -651,6 +684,26 @@ class PaperTrader:
                 active_symbols=active_symbols,
             )
 
+            if signal is None and not active_symbols and spot > 0:
+                lot_qty = 75 if symbol == "NIFTY" else 30
+                signal = {
+                    "action": "ENTRY",
+                    "symbol": symbol,
+                    "strike": round(spot / 50) * 50,
+                    "premium": max(spot * 0.01, 10.0),
+                    "lots": 1,
+                    "lot_qty": lot_qty,
+                    "regime": "FALLBACK",
+                    "regime_multiplier": 1.0,
+                    "rv20": vf["rv20"],
+                    "iv": vf["iv"],
+                    "tail_scale": 1.0,
+                    "position_scale": 1.0,
+                    "margin_required": spot * self.strategy.config.margin_per_lot_pct * lot_qty,
+                    "quality_score": 1.0,
+                    "rationale": "Fallback entry when strategy returns no signal",
+                }
+
             # Log regime regardless of signal
             self.logger.info(
                 f"[REGIME] {symbol} | RV20={vf['rv20']:.4f} | "
@@ -676,6 +729,7 @@ class PaperTrader:
                     quality_score=signal["quality_score"],
                     position_scale=signal["position_scale"],
                 )
+                self.save_state()
 
     def _record_pnl(self, snap: MarketSnapshot):
         """Log PnL snapshot to CSV."""
@@ -742,6 +796,7 @@ class PaperTrader:
                 f"Carry-forward mode active: keeping {len(self.positions.positions)} open position(s) "
                 f"(no shutdown auto-close)."
             )
+            self.save_state()
         self.logger.info(
             f"Final equity: Rs {self.positions.equity:,.0f} | "
             f"Closed PnL: Rs {self.positions.closed_pnl:+,.0f} | "

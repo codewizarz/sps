@@ -94,6 +94,7 @@ class LiveStrategy:
         else:
             regime = "HIGH"
 
+        print(f"[STRATEGY] {symbol} rv={rv20} iv={features.get('iv')} regime={regime}")
         logger.info(f"[REGIME] {symbol} | RV20={rv20:.4f} | Regime={regime}")
 
         has_position = bool(kwargs.get("has_position", False))
@@ -128,7 +129,8 @@ class LiveStrategy:
             return None
 
         # Entry allowed only when no active symbol position exists.
-        if regime in ["LOW", "NORMAL"]:
+        entry_threshold = 0.01
+        if rv20 > entry_threshold * 0.9 and regime in ["LOW", "NORMAL"]:
             logger.info("[SIGNAL] Entry condition satisfied")
             return "ENTRY"
 
